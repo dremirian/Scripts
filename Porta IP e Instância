@@ -1,0 +1,5 @@
+SELECT DISTINCT CONNECTIONPROPERTY('local_net_address') AS local_net_address,
+@@servername,
+local_tcp_port
+FROM sys.dm_exec_connections
+WHERE local_tcp_port IS NOT NULL
