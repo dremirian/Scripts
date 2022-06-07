@@ -1,0 +1,10 @@
+[9:01 AM] Junior Moraes
+    
+
+SQLCMD -S 10.192.76.60,1435 -U sa -P bfpp$@03 -A
+
+?[9:01 AM] Junior Moraes
+    
+
+SQLCMD -S [SQL Server Name] -U [User Name] -P [Password] -A
+
