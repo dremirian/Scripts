@@ -1,0 +1,61 @@
+--SCRIPT
+
+-- Setting up variables for script
+DECLARE 
+@TotalMEMORYinBytes NUMERIC, -- Intial memory value of physical server in bytes
+@TotalMEMORYinMegaBytes NUMERIC, -- Converted value of physical server memory in megabytes
+@SQLMaxMemoryMegaByte NUMERIC, -- Value to use for SQL server MAX memory value in megabytes
+@RamOver16GB NUMERIC, -- Used to check if physical memory is over 16 gigabytes
+@MaxMemoryConfiguration SQL_VARIANT,
+@memory_in_use_kb NUMERIC
+
+-- Read physical memory on server 
+SET @TotalMEMORYinBytes = (select physical_memory_kb *1024 /*physical_memory_in_byte*/ from sys.dm_os_sys_info) 
+
+-- Coverting value from bytes to megabytes
+SET @TotalMEMORYinMegaBytes = (@TotalMEMORYinBytes /(1024*1024))/1024 
+
+-- OS need mim 1GB of RAM. Add 1 gigabyte to final value of MAX memory
+SET @SQLMaxMemoryMegaByte = 1024 
+
+-- If Total Memory is great thatn 16 GB of RAM then add 4 GB of RAM
+IF @TotalMEMORYinMegaBytes > 16384 
+BEGIN
+SET @SQLMaxMemoryMegaByte = (@SQLMaxMemoryMegaByte + 4096) -- Add 4 gigabytes to final value of MAX memory
+SET @RamOver16GB = ((@TotalMEMORYinMegaBytes - 16384)/8) -- Determine how much memory of over the 16GB of RAM
+SET @SQLMaxMemoryMegaByte = (@SQLMaxMemoryMegaByte + @RamOver16GB) -- Add 1GB of RAM for every 8GB of RAM above 16GB to sub total
+END
+ 
+-- Check if Total Memory is less than 16 GB but more than 12 GB
+IF (@TotalMEMORYinMegaBytes < 16384 and @TotalMEMORYinMegaBytes > 12288 ) SET @SQLMaxMemoryMegaByte = (@SQLMaxMemoryMegaByte + 4 )
+ 
+-- Check if Total Memory is less than 12 GB but more than 8 GB
+IF (@TotalMEMORYinMegaBytes < 12288 and @TotalMEMORYinMegaBytes > 8192) SET @SQLMaxMemoryMegaByte = (@SQLMaxMemoryMegaByte + 3 )
+ 
+-- Check if Total Memory is less than 8 GB but more than 4 GB
+IF (@TotalMEMORYinMegaBytes < 8192 and @TotalMEMORYinMegaBytes > 4096) SET @SQLMaxMemoryMegaByte = (@SQLMaxMemoryMegaByte + 2 )
+ 
+-- Check if Total Memory is less than 4 GB 
+ 
+IF @TotalMEMORYinMegaBytes < 4096 SET @SQLMaxMemoryMegaByte = (@SQLMaxMemoryMegaByte + 0 )
+ 
+-- Calculate Maximum Memory settings in megabytes
+SET @SQLMaxMemoryMegaByte = (@TotalMEMORYinMegaBytes - @SQLMaxMemoryMegaByte) 
+ 
+-- Show final value to use for MAX memory in SQL server. Value is set to megabytes because interface as for value in megabytes
+SELECT @MaxMemoryConfiguration = value_in_use FROM sys.configurations WHERE name like '%server memory%' AND NAME = 'max server memory (MB)'
+SELECT @TotalMEMORYinMegaBytes as [O.S_Memory_Available_MB]   
+SELECT @MaxMemoryConfiguration as [Maximum_Server_Memory_Configured_MB]
+
+SELECT
+(physical_memory_in_use_kb/1024) AS Memory_usedby_Sqlserver_MB
+FROM sys.dm_os_process_memory;
+
+SET @memory_in_use_kb = (SELECT physical_memory_in_use_kb/1024 FROM sys.dm_os_process_memory)
+
+IF @memory_in_use_kb < @SQLMaxMemoryMegaByte
+	BEGIN SELECT @SQLMaxMemoryMegaByte as [Maximum_Server_Memory_Recomended_MB]
+	END
+	ELSE
+	BEGIN SELECT @memory_in_use_kb +512 as [Maximum_Server_Memory_Recomended_MB]
+	END
