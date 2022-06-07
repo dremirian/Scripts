@@ -1,0 +1,39 @@
+[9:16 AM] Junior Moraes
+    
+
+DECLARE @sqltext VARBINARY(256)
+SELECT @sqltext = sql_handle
+FROM sys.sysprocesses
+WHERE spid = 541
+SELECT TEXT
+FROM sys.dm_exec_sql_text(@sqltext)
+GO
+SELECT eST.text AS sql_cmd
+       , SUBSTRING
+             (
+                    eST.text
+                    , eC.statement_start_offset / 2
+                    ,
+        (
+                    CASE WHEN eC.statement_end_offset = -1 THEN DATALENGTH(eST.text)
+                           ELSE eC.statement_end_offset
+                    END - eC.statement_start_offset 
+             ) / 2
+             ) AS statement_executing 
+       , eC.session_id
+           , eC.cursor_id
+           , eC.name
+           , eC.properties
+           , eC.statement_start_offset
+           , eC.statement_end_offset
+           , eC.creation_time
+           , eC.worker_time
+           , eC.reads
+           , eC.writes
+           , eC.dormant_duration 
+FROM sys.dm_exec_cursors(432) AS eC 
+       CROSS APPLY sys.dm_exec_sql_text(eC.sql_handle) AS eST
+ORDER BY eC.session_id;
+ 
+
+
