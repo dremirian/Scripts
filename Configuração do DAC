@@ -1,0 +1,12 @@
+--DAC CONFIGURA«√O PARA ACESSO REMOTO
+
+--LOCALIZANDO CONFIGURA«√O DO DAC 0 = OFF, 1 = ON
+SELECT name, maximum, value_in_use
+FROM sys.configurations WHERE NAME = 'remote admin connections'
+GO
+ 
+ --HABILITANDO ACESSO REMOTO
+EXEC sp_configure 'remote admin connections', 1;
+GO
+RECONFIGURE
+GO
