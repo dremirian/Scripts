@@ -1,0 +1,14 @@
+--DATA UPDATE STATISTICS
+SELECT A.object_id,
+             OBJECT_NAME(A.object_id) AS 'Tabelas' ,
+             B.name,
+             type_desc,
+			 STATS_DATE(B.object_id, stats_id) AS LastStatsUpdate
+			 FROM sys.indexes A
+inner join sys.stats B 
+on A.name = B.name
+WHERE 
+--object_id = OBJECT_ID('Sales.SalesOrderDetail') and 
+left(B.name,4)!='_WA_'
+order by STATS_DATE(B.object_id, stats_id) DESC
+Go
