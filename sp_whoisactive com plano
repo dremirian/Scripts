@@ -1,0 +1,9 @@
+[10:38 AM] Junior Moraes
+    --SP_WHOISACTIVE COM FILTROS
+EXEC dbo.sp_WhoIsActive
+@get_transaction_info=0,
+@get_plans=1,
+@output_column_list ='[session_id][start_time][blocking_session_id]
+                  [cpu][status][context_switches][wait_info][login_name][query_plan]
+                 [database_name][program_name][sql_text][host_name][open_tran_count]',
+@sort_order='[dd:hh:mm:ss:mss]DESC'
