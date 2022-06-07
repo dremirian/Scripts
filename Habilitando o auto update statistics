@@ -1,0 +1,8 @@
+No SQL Server Management Studio, clicar com o bot„o direito do mouse em cada banco de dados e acessar
+ suas propriedades para alterar a opÁ„o ìCriaÁ„o Autom·tica de EstatÌsticasî 
+ para ativado. Isso entra em vigor imediatamente para consultas executadas a partir desse ponto. 
+ ApÛs a alteraÁ„o, vocÍ pode monitorar o desempenho geral do sistema em busca de melhorias, 
+ especialmente em torno dos planos de execuÁ„o de consultas.
+
+--FONTE
+https://docs.microsoft.com/pt-br/sql/relational-databases/statistics/statistics?view=sql-server-2017
