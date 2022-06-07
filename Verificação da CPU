@@ -1,0 +1,14 @@
+ --SCRIPT
+select scheduler_id, cpu_id, status fROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE'
+select cpu_count FROM sys.dm_os_sys_info
+ 
+----------------------------------------------------------------------------------------------------------------
+-- CPU VISIABLE ONLINE CHECK
+----------------------------------------------------------------------------------------------------------------
+DECLARE @OnlineCpuCount int
+DECLARE @LogicalCpuCount int
+ 
+SELECT @OnlineCpuCount = COUNT(*) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE'
+SELECT @LogicalCpuCount = cpu_count FROM sys.dm_os_sys_info 
+ 
+SELECT @LogicalCpuCount AS 'ASSIGNED ONLINE CPU #', @OnlineCpuCount AS 'VISIBLE ONLINE CPU #'
