@@ -1,0 +1,44 @@
+
+--LOCALIZANDO INDICES FRAGMENTADOS PARA MELHORAR PERFOMANCE
+--INFORMAR BANCO QUE V¡ UTILIZAR
+
+'FALTA MONTAR COM NOME DE TABELAS'
+
+Use Master 
+Go 
+select DISTINCT B.NAME AS NAME_INDEX, 
+C.NAME AS NAME_DATABASE, 
+B.TYPE, A.object_id, 
+A.avg_fragmentation_in_percent  
+from sys.indexes AS B
+inner join sys.dm_db_index_physical_stats (DB_ID('BackOffice'), object_id('Loja'),Null, Null, 'LIMITED') as A
+on B.object_id = A.object_id
+inner join sys.sysdatabases as C
+on A.database_id = C.dbid
+WHERE A.avg_fragmentation_in_percent > '5' and A.avg_fragmentation_in_percent < '31' 
+GROUP BY B.NAME, C.NAME, B.TYPE, A.object_id, A.avg_fragmentation_in_percent
+
+
+/*	BOAS PRATICAS DE AUTO INDEX - INSTRU«√O CORRETIVA
+QUANDO O VALOR "avg_fragmentation_in_percent":
+
+MAIOR 5% e MENOR;IGUAL 30% ----> ALTER INDEX REORGANIZE
+MAIOR 30% --------> ALTER INDEX REBUILD WITH (ONLINE = ON)*/
+
+
+--REORGANIZAR INDICES DA TABELA
+ALTER INDEX ALL ON NOME_DA_TABELA REORGANIZE 
+Go
+
+--REORGANIZAR SOMENTE UM INDICE DA TABELA
+ALTER INDEX NOME_DO_INDICE ON NOME_DA_TABELA REORGANIZE 
+Go 
+
+--RECRIANDO TODOS OS INDICES DA TABELA
+ALTER INDEX ALL ON NOME_DA_TABELA REBUILD 
+Go 
+
+--RECRIANDO SOMENTE UM INDICE DA TABELA
+ALTER INDEX NOME_DO_INDICE ON NOME_DA_TABELA REBUILD 
+Go 
+ 
