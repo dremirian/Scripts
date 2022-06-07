@@ -1,0 +1,9 @@
+SELECT *
+FROM sysdatabases
+WHERE name NOT IN (
+		SELECT database_name
+		FROM backupset
+		WHERE backup_finish_date > '2020-01-01 00:00:00.000' -- ATUALIZAR PERIODO
+		)
+
+--VERIFICA OS BANCOS FORA DA DATA ATUAL DE BACKUP
