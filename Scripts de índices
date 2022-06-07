@@ -1,0 +1,188 @@
+Õndice Clusterizado
+Os Ìndices clusterizados armazenam as linhas de dados em ordem ordenada na tabela com base em seus valores-chave. Apenas um Ìndice cluster pode ser criado por tabela, porque as linhas de dados em si sÛ podem ser classificadas em uma ordem.
+Um Ìndice cluster pode ser criado enquanto cria as restriÁıes como chave prim·ria em uma tabela existente. Vejamos a seguir:
+
+
+ALTER TABLE [MyAddress] 
+ADD  CONSTRAINT [PK_Address_AddressID] PRIMARY KEY CLUSTERED 
+(
+    [AddressID] ASC
+) ON [PRIMARY]
+GO
+Um Ìndice cluster tambÈm pode ser criado em uma coluna sem cl·usulas relacionadas a restriÁıes. Exemplo:
+
+
+CREATE CLUSTERED INDEX [MyAddress_id_CIX] ON [MyAddress1] 
+(
+    [ID] ASC
+)ON [PRIMARY]
+GO
+Õndice n„o clusterizado.
+
+Geralmente, os Ìndices n„o-clusters s„o criados para melhorar o desempenho de consultas freq¸entemente usadas n„o cobertas pelo Ìndice cluster. Em um Ìndice n„o clusterizado, a ordem lÛgica do Ìndice n„o corresponde ‡ ordem fÌsica armazenada das linhas no disco.
+
+Um Ìndice n„o clusterizado pode ser criado em uma tabela existente cobrindo as colunas n„o cobertas pelo Ìndice agrupado. Exemplo:
+
+
+CREATE UNIQUE NONCLUSTERED INDEX
+[NIX_col5_col2_col3_col4_col6] 
+ON [MyAddress] 
+(
+    [AddressLine1] ASC,
+    [AddressLine2] ASC,
+    [City] ASC,
+    [StateProvinceID] ASC,
+    [PostalCode] ASC
+)ON [PRIMARY]
+GO
+Um Ìndice n„o clusterizado tambÈm pode ser criado ao criar restriÁıes na tabela existente. Exemplo:
+
+
+ALTER TABLE [MyAddressType] 
+ADD  CONSTRAINT [DEFF_MyAddressType_ModifiedDate]  
+DEFAULT (getdate()) FOR [ModifiedDate]
+GO
+ 
+
+Õndice XML:
+
+Um Ìndice XML pode ser criado em uma coluna XML e a tabela deve ter um Ìndice cluster. O Ìndice XML pode ser prim·rio ou secund·rio.
+
+Um Ìndice XML prim·rio pode ser criado como mostrado abaixo:
+
+
+CREATE PRIMARY XML INDEX idx_xCol_MinhaTabela on MinhaTabela (xCol)
+Um Ìndice XML secund·rio pode ser criado como mostrado abaixo:
+
+CREATE TABLE MinhaTabela (Col1 INT PRIMARY KEY, XmlCol XML)
+GO
+-- Criando indice primario.
+CREATE PRIMARY XML INDEX PIdx_MinhaTabela_XmlCol 
+ON T(XmlCol)
+GO
+-- Criando indices secundarios (PATH, VALUE, PROPERTY).
+CREATE XML INDEX PIdx_MinhaTabela_XmlCol_PATH ON MinhaTabela(XmlCol)
+USING XML INDEX PIdx_MinhaTabela_XmlCol
+FOR PATH
+GO
+CREATE XML INDEX PIdx_MinhaTabela_XmlCol_VALUE ON T(XmlCol)
+USING XML INDEX PIdx_MinhaTabela_XmlCol
+FOR VALUE
+GO
+Spatial Index:
+
+O SQL Server 2008 apresentou um novo tipo especial de coluna chamada coluna espacial, que È uma coluna de tabela que contÈm dados de um tipo de dados espaciais, como geometria ou geografia.
+
+Um Ìndice spatial index pode ser criado usando a seguinte sintaxe:
+
+
+CREATE TABLE MinhaTabelaEspacial(id int primary key, geometry_col geometry);
+CREATE SPATIAL INDEX SIndx_MinhaTabelaEspacial_geometry_col1 
+   ON MinhaTabelaEspacial(geometry_col)
+   WITH ( BOUNDING_BOX = ( 0, 0, 500, 200 ) );
+ 
+
+Saber mais sobre os Ìndices:
+Encontrando todos os Ìndices.
+
+A consulta a seguir pode ser usada para consultar todas as tabelas, colunas e Ìndices no banco de dados atual.
+
+
+SELECT OBJECT_SCHEMA_NAME(BaseT.[object_id],DB_ID()) AS [Schema], 
+ BaseT.[name] AS [table_name], I.[name] AS [index_name], AC.[name] AS [column_name], 
+ I.[type_desc]
+FROM sys.[tables] AS BaseT 
+ INNER JOIN sys.[indexes] I ON BaseT.[object_id] = I.[object_id] 
+ INNER JOIN sys.[index_columns] IC ON I.[object_id] = IC.[object_id] 
+ INNER JOIN sys.[all_columns] AC ON BaseT.[object_id] = AC.[object_id] AND IC.[column_id] = AC.[column_id] 
+WHERE BaseT.[is_ms_shipped] = 0 AND I.[type_desc] <> 'HEAP'
+ORDER BY BaseT.[name], I.[index_id], IC.[key_ordinal]
+Query para descobrir a fragmentaÁ„o de todos os Ìndices.
+Õndices fragmentado ocupa muito espaÁo em disco, desfragment·-los vocÍ ganhar· mais espaÁo em disco.
+
+SELECT object_name(IPS.object_id) AS [TableName], 
+   SI.name AS [IndexName], 
+   IPS.Index_type_desc, 
+   IPS.avg_fragmentation_in_percent, 
+   IPS.avg_fragment_size_in_pages, 
+   IPS.avg_page_space_used_in_percent, 
+   IPS.record_count, 
+   IPS.ghost_record_count,
+   IPS.fragment_count, 
+   IPS.avg_fragment_size_in_pages
+FROM sys.dm_db_index_physical_stats(db_id(DB_NAME()), NULL, NULL, NULL , 'DETAILED') IPS
+   JOIN sys.tables ST WITH (nolock) ON IPS.object_id = ST.object_id
+   JOIN sys.indexes SI WITH (nolock) ON IPS.object_id = SI.object_id AND IPS.index_id = SI.index_id
+WHERE ST.is_ms_shipped = 0
+order by IPS.avg_fragment_size_in_pages desc
+Descobrir todos os Ìndices que est„o faltando.
+O SQL Server mantÈm um registo dos Ìndices que acredita que vocÍ deve criar e que ajudar„o a melhorar o desempenho das consultas. O Script a seguir lista todos os Ìndices ausentes.
+
+
+SELECT  sys.objects.name
+, (avg_total_user_cost * avg_user_impact) * (user_seeks + user_scans) AS Impact
+,  'CREATE NONCLUSTERED INDEX ix_IndexName ON ' + sys.objects.name COLLATE DATABASE_DEFAULT + ' ( ' + IsNull(mid.equality_columns, '') + CASE WHEN mid.inequality_columns IS NULL
+                THEN '' 
+    ELSE CASE WHEN mid.equality_columns IS NULL
+                    THEN '' 
+        ELSE ',' END + mid.inequality_columns END + ' ) ' + CASE WHEN mid.included_columns IS NULL
+                THEN '' 
+    ELSE 'INCLUDE (' + mid.included_columns + ')' END + ';' AS CreateIndexStatement
+, mid.equality_columns
+, mid.inequality_columns
+, mid.included_columns 
+    FROM sys.dm_db_missing_index_group_stats AS migs 
+            INNER JOIN sys.dm_db_missing_index_groups AS mig ON migs.group_handle = mig.index_group_handle 
+            INNER JOIN sys.dm_db_missing_index_details AS mid ON mig.index_handle = mid.index_handle AND mid.database_id = DB_ID() 
+            INNER JOIN sys.objects WITH (nolock) ON mid.OBJECT_ID = sys.objects.OBJECT_ID 
+    WHERE     (migs.group_handle IN
+        ( 
+        SELECT     TOP (500) group_handle 
+            FROM          sys.dm_db_missing_index_group_stats WITH (nolock) 
+            ORDER BY (avg_total_user_cost * avg_user_impact) * (user_seeks + user_scans) DESC))  
+        AND OBJECTPROPERTY(sys.objects.OBJECT_ID, 'isusertable')=1 
+    ORDER BY 2 DESC , 3 DESC
+Õndice n„o utilizado.
+O Script a seguir lista todos os Ìndices que n„o foram usados. TambÈm gera a instruÁ„o de DROP que pode ser ˙til ao excluir os Ìndices.
+
+
+SELECT o.name, indexname=i.name, i.index_id 
+, reads=user_seeks + user_scans + user_lookups 
+, writes = user_updates 
+, rows = (SELECT SUM(p.rows) FROM sys.partitions p WHERE p.index_id = s.index_id AND s.object_id = p.object_id)
+, CASE
+ WHEN s.user_updates < 1 THEN 100
+ ELSE 1.00 * (s.user_seeks + s.user_scans + s.user_lookups) / s.user_updates
+ END AS reads_per_write
+, 'DROP INDEX ' + QUOTENAME(i.name) 
++ ' ON ' + QUOTENAME(c.name) + '.' + QUOTENAME(OBJECT_NAME(s.object_id)) as 'drop statement'
+FROM sys.dm_db_index_usage_stats s 
+INNER JOIN sys.indexes i ON i.index_id = s.index_id AND s.object_id = i.object_id 
+INNER JOIN sys.objects o on s.object_id = o.object_id
+INNER JOIN sys.schemas c on o.schema_id = c.schema_id
+WHERE OBJECTPROPERTY(s.object_id,'IsUserTable') = 1
+AND s.database_id = DB_ID() 
+AND i.type_desc = 'nonclustered'
+AND i.is_primary_key = 0
+AND i.is_unique_constraint = 0
+AND (SELECT SUM(p.rows) FROM sys.partitions p WHERE p.index_id = s.index_id AND s.object_id = p.object_id) > 10000
+ORDER BY reads
+
+ManutenÁ„o de Ìndices:
+Rebuild Ìndice.
+Quando um Ìndice est· fragmentado, ele requer a desfragmentaÁ„o. A desfragmentaÁ„o pode ser feita usando a cl·usula de REBUILD ao alterar uma tabela. Esse comando È equivalente a DBCC DBREINDEX em versıes do SQL Server anteriores a 2005. O comando que pode ser usado para reconstruir o Ìndice È da seguinte maneira:
+
+
+USE AdventureWorks2008R2;
+GO
+ALTER INDEX PK_Employee_BusinessEntityID ON HumanResources.Employee
+REBUILD;
+GO
+Reorganize Ìndice.
+Especifica que o nÌvel de folha de Ìndice ser· reorganizado. A declaraÁ„o REORGANIZE È sempre realizada on-line. O que permite n„o locar (bloquear) a tabela ao organizar o Ìndice. Esse comando È equivalente a DBCC INDEXDEFRAG em versıes do SQL Server anteriores a 2005.
+
+USE AdventureWorks2008R2;
+GO
+ALTER INDEX PK_ProductPhoto_ProductPhotoID ON Production.ProductPhoto
+REORGANIZE ;
+GO
