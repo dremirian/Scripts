@@ -1,0 +1,156 @@
+IF EXISTS (select 1 from sys.procedures where type = 'P' and name = 'sp__qact')
+	BEGIN
+		drop procedure sp__qact
+	END
+ 	
+
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp__qact] 
+WITH ENCRYPTION AS 
+
+SET NOCOUNT ON
+
+DECLARE @DT_MONIT DATETIME
+SET @DT_MONIT = getdate()	
+
+print ''
+print '========================================================='
+print @DT_MONIT
+print '========================================================='
+print ''
+SELECT 	b.session_id,
+		case  
+          when a.status is null then b.status 
+          else a.status 
+        end as status, 
+		b.is_user_process, 
+		a.blocking_session_id, 
+		case when b.login_name='' then CONVERT(char(40),b.original_login_name) else CONVERT(char(40), b.login_name) end as login_name, 
+		b.client_interface_name
+		into #tb_tmp_qact
+		FROM 	sys.dm_exec_sessions	b
+		LEFT JOIN sys.dm_exec_requests	a 
+		on b.session_id=a.session_id
+
+print '========================================================='
+print 'Visão Geral'
+print '========================================================='
+print ''
+SELECT	dth_monit	= 	GETDATE(),
+		con_total	= 	COUNT(*),
+		con_users	=	SUM(
+			CASE WHEN		session_id <> @@spid
+						AND is_user_process = 1
+				THEN 1 
+				ELSE 0 
+			END
+		), 
+		con_ativas	=	SUM(
+			CASE WHEN status in('running','suspended','runnable') AND is_user_process = 1
+				THEN 1 
+				ELSE 0 
+			END
+		)
+		FROM	#tb_tmp_qact
+print ''
+print ''
+select 
+    count(*) as Qtd_Total_Conn, 
+    sum(case ss.status 
+          when 'running' then 1 
+          else 0 
+        end) as 'Running', 
+	sum(case ss.status 
+          when 'sleeping' then 1 
+          else 0 
+        end) as 'Sleeping', 
+	sum(case ss.status 
+          when 'runnable' then 1 
+          else 0 
+        end) as 'Runnable', 
+	sum(case ss.status 
+          when 'suspended' then 1 
+          else 0 
+        end) as 'Suspended', 
+	sum(case when ss.status ='suspended' and ss.blocking_session_id <> 0 
+		  then 1
+          else 0 
+        end) as 'LockWait', 	
+	sum(case ss.status 
+          when 'background' then 1 
+          else 0 
+        end) as 'Background', 		
+    sum(case 
+          when ss.status not in 
+                      ('running' 
+                      ,'sleeping' 
+                      ,'background' 
+                      ,'suspended'
+					  ,'runnable'
+					  ,'dormant') 
+               then 1 
+          else 0 
+        end) as 'other' 
+from #tb_tmp_qact ss
+
+print ''
+print '========================================================='
+print 'Visão Login/Client'
+print '========================================================='
+print ''
+select 
+convert(char(30),ss.login_name) as LoginName, convert(char(30)
+,ss.client_interface_name) as ClientName, 
+    count(*) as Qtd_Total_Conn, 
+    sum(case ss.status 
+          when 'running' then 1 
+          else 0 
+        end) as 'Running', 
+	sum(case ss.status 
+          when 'sleeping' then 1 
+          else 0 
+        end) as 'Sleeping', 
+	sum(case ss.status 
+          when 'runnable' then 1 
+          else 0 
+        end) as 'Runnable', 
+	sum(case ss.status 
+          when 'suspended' then 1 
+          else 0 
+        end) as 'Suspended', 
+	sum(case when ss.status ='suspended' and ss.blocking_session_id <> 0 
+		  then 1
+          else 0 
+        end) as 'LockWait', 	
+	sum(case ss.status 
+          when 'background' then 1 
+          else 0 
+        end) as 'Background', 	
+	sum(case ss.status 
+          when 'dormant' then 1 
+          else 0 
+        end) as 'Dormant', 		
+	sum(case ss.status 
+          when 'suspended' then 1 
+          else 0 
+        end) as 'Dormant', 	
+    sum(case 
+          when ss.status not in 
+                      ('running' 
+                      ,'sleeping' 
+                      ,'background' 
+                      ,'suspended'
+					  ,'runnable'
+					  ,'dormant') 
+               then 1 
+          else 0 
+        end) as 'other' 
+from #tb_tmp_qact ss 
+group by ss.login_name, ss.client_interface_name
+
+drop table #tb_tmp_qact
