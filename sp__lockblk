@@ -1,0 +1,161 @@
+IF EXISTS (select 1 from sys.procedures where type = 'P' and name = 'sp__lockblk')
+	BEGIN
+		drop procedure sp__lockblk
+	END
+
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp__lockblk] (@spid int = null) 
+WITH ENCRYPTION AS
+ 
+SET NOCOUNT ON 
+
+DECLARE @DT_MONIT DATETIME
+SET @DT_MONIT = getdate()	
+
+print ''
+print '========================================================='
+print @DT_MONIT
+print '========================================================='
+print ''
+-- Bloqueados
+SELECT	a.session_id,
+		b.login_name,
+		a.user_id,
+		case 
+			when a.[status] is null then b.[status] 
+			when a.[status] is not null and a.[blocking_session_id] <> 0 then 'lockwait' 
+			else a.[status] 
+		end as [status]
+		,a.blocking_session_id,
+		c.resource_database_id,
+		c.resource_associated_entity_id,
+		c.request_mode,
+		b.host_name,
+		b.program_name,
+		wait_event	= CONVERT(char(50),(REPLACE(CONVERT(char(30),a.wait_type),' ', '') + '  (' + REPLACE(STR(a.wait_time, 8),' ', '') + ' ms)'))
+		INTO #tmp_tb_blocked
+		FROM			sys.dm_exec_requests as a 		with (READUNCOMMITTED)
+		INNER 	JOIN	sys.dm_exec_sessions as b 		with (READUNCOMMITTED) ON a.session_id = b.session_id 
+		LEFT 	JOIN	sys.dm_tran_locks 	as c 		with (READUNCOMMITTED) ON c.request_session_id = a.session_id AND c.resource_type = 'OBJECT' AND a.database_id = c.resource_database_id
+		WHERE a.blocking_session_id > 0
+	
+		
+-- Bloqueadores		
+SELECT	a.session_id,
+		a.login_name,
+		a.status,
+		blocking_session_id = CONVERT(varchar(3),'N/A'),
+		c.resource_database_id,
+		c.resource_associated_entity_id,
+		c.request_mode,
+		a.host_name,
+		a.program_name
+		INTO #tmp_tb_blocking	
+		FROM			sys.dm_exec_sessions	as a with (READUNCOMMITTED)
+		INNER 	JOIN	#tmp_tb_blocked			as b ON a.session_id	= 	b.blocking_session_id 
+		LEFT 	JOIN	sys.dm_tran_locks		as c with (READUNCOMMITTED) ON c.request_session_id = b.blocking_session_id AND c.resource_type = 'OBJECT' AND b.resource_database_id = c.resource_database_id
+		WHERE not exists
+				(select 1 from sys.dm_exec_requests r with (READUNCOMMITTED) where r.session_id=b.blocking_session_id)
+UNION
+SELECT	a.session_id,
+		a.login_name,
+		case when c.blocking_session_id > 0 then b.status else a.status end as status,
+		convert(varchar(5),c.blocking_session_id) as blocking_session_id,
+		d.resource_database_id,
+		d.resource_associated_entity_id,
+		d.request_mode,
+		a.host_name,
+		a.program_name
+		FROM			sys.dm_exec_sessions 	as a with (READUNCOMMITTED)
+		INNER	JOIN 	#tmp_tb_blocked 		as b ON a.session_id	= 	b.blocking_session_id 
+		INNER	JOIN 	sys.dm_exec_requests	as c with (READUNCOMMITTED) ON b.blocking_session_id	=	c.session_id
+		LEFT	JOIN 	sys.dm_tran_locks		as d with (READUNCOMMITTED) ON c.session_id	=	d.request_session_id AND d.resource_type = 'OBJECT' AND b.resource_database_id = d.resource_database_id
+
+
+-- RETORNA RESULTADOS
+
+print '========================================================='
+print 'SESSOES BLOQUEANDO'
+print '========================================================='
+print ''
+DECLARE @SPIDBLK INT
+SELECT	DISTINCT
+		spid			= convert(char(7),tbblk.session_id),
+		qtdblk			= convert(char(7),(select COUNT(*) from #tmp_tb_blocked tbwait where tbwait.blocking_session_id = tbblk.session_id)),
+		blocked			= convert(char(7),tbblk.blocking_session_id),
+		login			= convert(char(32), tbblk.login_name),
+		status			= convert(char(15), tbblk.status),
+		database_name	= convert(char(20), db_name(tbblk.resource_database_id)),
+		object_id		= 
+		case 
+			when tbblk.resource_associated_entity_id < 99 then '('+convert(varchar(20),tbblk.resource_associated_entity_id)+') systable'
+			else convert(varchar(20),tbblk.resource_associated_entity_id)
+		end,
+		request_mode	= convert(char(15), tbblk.request_mode),
+		host_name		= convert(char(20), tbblk.host_name),
+		program_name	= convert(char(30), tbblk.program_name)
+FROM	#tmp_tb_blocking tbblk
+ORDER BY status DESC
+		
+print ''
+print '========================================================='
+print 'SESSOES BLOQUEADAS'
+print '========================================================='
+print ''		
+SELECT	DISTINCT 
+		spid			= convert(char(6),tbwait.session_id),
+		status			= convert(char(10), tbwait.status),
+		blocked		 	= convert(char(7),tbwait.blocking_session_id),	
+		login			= convert(char(30), tbwait.login_name),	
+		wait_event		= convert(char(30), tbwait.wait_event),
+		request_mode	= convert(char(15), tbwait.request_mode),
+		database_name	= convert(char(20), db_name(tbwait.resource_database_id)),
+		object_id		= 
+		case 
+			when tbwait.resource_associated_entity_id < 99 then '('+convert(varchar(20),tbwait.resource_associated_entity_id)+') systable'
+			else convert(varchar(20),tbwait.resource_associated_entity_id)
+		end,
+		host_name		= convert(char(20), tbwait.host_name),
+		program_name	= convert(char(46), tbwait.program_name)
+FROM	#tmp_tb_blocked	tbwait	
+WHERE not exists ( select 1 from #tmp_tb_blocking tblk where tbwait.session_id=tblk.session_id)
+
+print ''
+print '========================================================='
+print 'SQL TEXT BLOQUEADOR'
+print '========================================================='
+print ''	
+
+SELECT TOP 1 @SPIDBLK = A.spid
+FROM 
+	(SELECT	DISTINCT
+			spid			= convert(char(7),tbblk.session_id),
+			qtdblk			= convert(char(7),(select COUNT(*) from #tmp_tb_blocked tbwait where tbwait.blocking_session_id = tbblk.session_id)),
+			blocked			= convert(char(7),tbblk.blocking_session_id),
+			login			= convert(char(32), tbblk.login_name),
+			status			= convert(char(15), tbblk.status),
+			database_name	= convert(char(20), db_name(tbblk.resource_database_id)),
+			object_id		= 
+			case 
+				when tbblk.resource_associated_entity_id < 99 then '('+convert(varchar(20),tbblk.resource_associated_entity_id)+') systable'
+				else convert(varchar(20),tbblk.resource_associated_entity_id)
+			end,
+			request_mode	= convert(char(15), tbblk.request_mode),
+			host_name		= convert(char(20), tbblk.host_name),
+			program_name	= convert(char(30), tbblk.program_name)
+			--sql_handle 		= convert(char(30), tbblk.sql_handle)
+	FROM	#tmp_tb_blocking tbblk) A
+	ORDER BY A.status DESC
+
+
+SELECT  @SPIDBLK as SPID, (SELECT [text] FROM sys.sysprocesses AS p
+		CROSS APPLY sys.dm_exec_sql_text(p.[sql_handle]) 
+		WHERE p.spid = @SPIDBLK) as last_sql_text
+
+drop table #tmp_tb_blocking
+drop table #tmp_tb_blocked
