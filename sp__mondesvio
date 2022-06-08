@@ -1,0 +1,672 @@
+IF EXISTS (select 1 from sys.procedures where type = 'P' and name = 'sp__mondesvio')
+	BEGIN
+		drop procedure sp__mondesvio
+	END
+
+USE [master] 
+GO 
+SET QUOTED_IDENTIFIER ON
+GO
+SET ANSI_NULLS ON
+GO
+
+	
+CREATE PROCEDURE [dbo].[sp__mondesvio]
+	@tempo int = 1,
+	@host nvarchar(128) = NULL,
+	@server nvarchar(128) = NULL,
+	@tabela_monit char(35) = 'master..monit_horus',
+	@tabela_monit_so_cpu char(35) = 'master..monit_horus_so_cpu'
+
+	
+WITH ENCRYPTION	
+AS
+
+SET NOCOUNT ON
+
+declare @now datetime
+declare @depois datetime
+declare @sec int
+declare	@SqlStatement nvarchar(MAX)
+declare @DatabaseName sysname
+declare @ProductVersion char(40)
+declare @cpu_ticks bigint
+declare @SqlStatementParm nvarchar(30)
+
+--- Coleta informacoes ---
+
+select @now = getdate()
+
+if @host is NULL
+	set @host = convert(nvarchar(128), SERVERPROPERTY('MachineName'))
+
+if @server is NULL
+	set @server = convert(nvarchar(128), SERVERPROPERTY('InstanceName'))
+
+set @ProductVersion = convert(nvarchar(128), Left(@@Version, Charindex('-', @@version) - 2))
+
+if @ProductVersion like '%2005%'
+	set @ProductVersion = '2005'
+
+if @ProductVersion like '%2008%'
+	set @ProductVersion = '2008'
+
+if @ProductVersion like '%2012%'
+	set @ProductVersion = '2012'
+
+if @ProductVersion like '%2014%'
+	set @ProductVersion = '2014'
+
+set @SqlStatementParm = N'@cpu_ticksOUT bigint OUTPUT';
+	
+--- Monitoracao Geral ---
+
+select counter_name, cntr_value, object_name , instance_name
+into #before_perf_counters 
+from sys.dm_os_performance_counters WITH (READUNCOMMITTED)
+
+create index before_perf_counters_idx on #before_perf_counters (counter_name,object_name,cntr_value,instance_name)
+
+
+  select * into #monit_before_mondesvio 
+  from (select counter_name, cntr_value, object_name 
+	  from #before_perf_counters 
+	  where object_name like '%:Buffer Manager%'
+	  and counter_name in ( 'Page lookups/sec',
+				'Readahead pages/sec',
+				'Page reads/sec',
+				'Page writes/sec',
+				'Page life expectancy',
+				'Lazy writes/sec',
+				'Free list stalls/sec',
+				'Checkpoint pages/sec',
+				'Stolen pages',
+				'Buffer cache hit ratio base',
+				'Buffer cache hit ratio')
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #before_perf_counters
+	  where object_name like '%:General Statistics%'
+	  and counter_name in ( 'Logins/sec',
+				'Logouts/sec',
+				'User Connections',
+				'Active Temp Tables',
+				'Processes blocked',
+				'Connection Reset/sec',
+				'Logical Connections',
+				'Non-atomic yield rate')
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #before_perf_counters 
+	  where object_name like '%:Access Methods%'
+	  and counter_name in ( 'Page Splits/sec',
+				'Table Lock Escalations/sec',
+				'Worktables Created/sec',
+				'Full Scans/sec',
+				'Index Searches/sec',
+				'Range Scans/sec',
+				'Probe Scans/sec')
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #before_perf_counters 
+	  where object_name like '%:Memory Manager%'
+	  and counter_name in ( 'Connection Memory (KB)',
+				'Lock Memory (KB)',
+				'Optimizer Memory (KB)',
+				'SQL Cache Memory (KB)',
+				'Total Server Memory (KB)',
+				'Memory Grants Pending',
+				'Memory Grants Outstanding')		
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #before_perf_counters
+	  where object_name like '%:Databases%'
+	  and counter_name in ('Transactions/sec',
+				'Log Flushes/sec',
+				'Log Bytes Flushed/sec',
+				'Log Flush Waits/sec',
+				'Log Flush Wait Time')
+	  and instance_name = '_Total'
+    union all
+	select counter_name, cntr_value, object_name 
+	  from #before_perf_counters
+	  where object_name like '%:Locks%'
+	  and counter_name in ('Lock Requests/sec',
+				'Lock Timeouts/sec',
+				'Number of Deadlocks/sec',
+				'Lock Waits/sec')
+	  and instance_name = '_Total'
+    union all
+	select counter_name, cntr_value, object_name 
+	  from #before_perf_counters 
+	  where object_name like '%:Latches%'
+	  and counter_name = ( 'Latch Waits/sec')	
+    union all
+	select counter_name, cntr_value, object_name 
+	  from #before_perf_counters 
+	  where object_name like '%:SQL Statistics%'
+	  and counter_name in ( 'SQL Compilations/sec',
+				'SQL Re-Compilations/sec',
+				'Batch Requests/sec')
+    union all
+	select counter_name, cntr_value, object_name 
+	  from #before_perf_counters 
+	  where object_name like '%:Plan Cache%'
+	  and counter_name in ( 'Cache Pages',
+				'Cache Object Counts',
+				'Cache Objects in use',
+				'Cache Hit Ratio',
+				'Cache Hit Ratio Base')
+	  and instance_name = '_Total'
+	union all
+	select counter_name, cntr_value, rtrim(ltrim(object_name)) + '_' + instance_name  as object_name
+	  from #before_perf_counters 
+	  where object_name like '%:Databases%'
+	  and counter_name in ('Data File(s) Size (KB)',
+				'Log File(s) Size (KB)',
+				'Log File(s) Used Size (KB)',
+				'Active Transactions',
+				'Transactions/sec')
+	  and instance_name <> '_Total'
+    union all
+	select counter_name, cntr_value, object_name
+	  from #before_perf_counters 
+	  where object_name like '%:Broker Statistics%'
+	  and counter_name in ('SQL SENDs/sec',
+				'SQL RECEIVEs/sec')
+    union all
+	select counter_name, cntr_value, object_name
+	  from #before_perf_counters 
+	  where object_name like '%:Wait Statistics%'
+	  and counter_name in ('Memory grant queue waits',
+				'Thread-safe memory objects waits',
+				'Log write waits',
+				'Log buffer waits',
+				'Network IO waits',
+				'Page latch waits',
+				'Wait for the worker')
+	  and instance_name = 'Average wait time (ms)'
+	union all
+	select counter_name, cntr_value, object_name
+	  from #before_perf_counters 
+	  where object_name like '%:SQL Errors%'
+	  and counter_name in ('Errors/sec')
+	  and instance_name = '_Total'
+	union all
+	select 'Buffer cache hit ratio - %' counter_name,
+         cast(((1 - ((select cast(sum(cntr_value) as decimal(38,2))                
+             from #before_perf_counters
+             where object_name like '%:Buffer Manager%'
+             and counter_name in (' Page writes/sec', 'Page reads/sec'))
+         / cast(cntr_value as decimal(38,2)))) * 100) as decimal(38,2)), object_name
+         from #before_perf_counters
+         where object_name like '%:Buffer Manager%'
+         and counter_name = 'Page lookups/sec'
+  	union all
+	select 'Plan cache hit ratio - %' counter_name,
+  		(((SELECT cntr_value FROM #before_perf_counters 
+  		WHERE counter_name = 'Cache Hit Ratio' 
+  		and object_name like '%:Plan Cache%'
+  		and instance_name = '_Total') * 1.0)/
+  		cntr_value) * 100.0 value, object_name
+  		from #before_perf_counters
+  		WHERE counter_name = 'Cache Hit Ratio Base' 
+  		and object_name like '%:Plan Cache%'
+  		and instance_name = '_Total'
+  	
+	) monit_before
+	
+--- Lockwait count antes ---
+
+select * into #monit_locks_mondesvio from 
+(
+select * from
+	(
+		select count(1) lockwait from sys.dm_exec_requests WITH (READUNCOMMITTED)
+		where blocking_session_id <>0) as lck,
+	(
+		select count(1) lockwait_5min from sys.dm_exec_requests WITH (READUNCOMMITTED)
+		where blocking_session_id <>0 and datediff(second,start_time,getdate()) > 5) as lck5
+) monit_locks
+
+
+--- Sleep ---
+select * into #monit_session_mondesvio from
+(
+SELECT * FROM      
+(select COUNT(1) TOTAL_CONN from sys.dm_exec_sessions WITH (READUNCOMMITTED) where is_user_process = 1) AA, 
+(select COUNT(1) ACTIVE_CONN from sys.dm_exec_sessions WITH (READUNCOMMITTED) where is_user_process = 1 and status = 'running' and login_name <> original_login()) BB
+) monit_session
+
+DECLARE @cnt INT;
+set @cnt = 0;
+
+WHILE @cnt < ( @tempo )
+BEGIN
+   waitfor delay '00:01:00'
+   SET @cnt = @cnt + 1;
+END;	
+  
+
+--- Monitoracao Geral ---
+
+select counter_name, cntr_value, object_name , instance_name
+into #after_perf_counters 
+from sys.dm_os_performance_counters WITH (READUNCOMMITTED)
+
+create index after_perf_counters_idx on #after_perf_counters (counter_name,object_name,cntr_value,instance_name)
+
+
+    select * into #monit_after_mondesvio 
+    from (select counter_name, cntr_value, object_name 
+	  from #after_perf_counters 
+	  where object_name like '%:Buffer Manager%'
+	  and counter_name in ( 'Page lookups/sec',
+				'Readahead pages/sec',
+				'Page reads/sec',
+				'Page writes/sec',
+				'Page life expectancy',
+				'Lazy writes/sec',
+				'Free list stalls/sec',
+				'Checkpoint pages/sec',
+				'Stolen pages',
+				'Buffer cache hit ratio base',
+				'Buffer cache hit ratio')
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #after_perf_counters 
+	  where object_name like '%:General Statistics%'
+	  and counter_name in ( 'Logins/sec',
+				'Logouts/sec',
+				'User Connections',
+				'Active Temp Tables',
+				'Processes blocked',
+				'Connection Reset/sec',
+				'Logical Connections',
+				'Non-atomic yield rate')
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #after_perf_counters 
+	  where object_name like '%:Access Methods%'
+	  and counter_name in ( 'Page Splits/sec',
+				'Table Lock Escalations/sec',
+				'Worktables Created/sec',
+				'Full Scans/sec',
+				'Index Searches/sec',
+				'Range Scans/sec',
+				'Probe Scans/sec')
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #after_perf_counters 
+	  where object_name like '%:Memory Manager%'
+	  and counter_name in ( 'Connection Memory (KB)',
+				'Lock Memory (KB)',
+				'Optimizer Memory (KB)',
+				'SQL Cache Memory (KB)',
+				'Total Server Memory (KB)',
+				'Memory Grants Pending',
+				'Memory Grants Outstanding')
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #after_perf_counters 
+	  where object_name like '%:Databases%'
+	  and counter_name in ('Transactions/sec',
+	  			'Log Flushes/sec',
+				'Log Bytes Flushed/sec',
+				'Log Flush Waits/sec',
+				'Log Flush Wait Time')
+	  and instance_name = '_Total'
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #after_perf_counters 
+	  where object_name like '%:Locks%'
+	  and counter_name in ('Lock Requests/sec',
+				'Lock Timeouts/sec',
+				'Number of Deadlocks/sec',
+				'Lock Waits/sec')
+	  and instance_name = '_Total'
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #after_perf_counters 
+	  where object_name like '%:Latches%'
+	  and counter_name = ( 'Latch Waits/sec')
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #after_perf_counters 
+	  where object_name like '%:SQL Statistics%'
+	  and counter_name in ( 'SQL Compilations/sec',
+				'SQL Re-Compilations/sec',
+				'Batch Requests/sec')
+	union all
+	select counter_name, cntr_value, object_name 
+	  from #after_perf_counters 
+	  where object_name like '%:Plan Cache%'
+	  and counter_name in ( 'Cache Pages',
+				'Cache Object Counts',
+				'Cache Objects in use',
+				'Cache Hit Ratio',
+				'Cache Hit Ratio Base')
+	  and instance_name = '_Total'
+	union all
+	select counter_name, cntr_value, rtrim(ltrim(object_name)) + '_' + instance_name  as object_name
+	  from #after_perf_counters 
+	  where object_name like '%:Databases%'
+	  and counter_name in ('Data File(s) Size (KB)',
+				'Log File(s) Size (KB)',
+				'Log File(s) Used Size (KB)',
+				'Active Transactions',
+				'Transactions/sec')
+	  and instance_name <> '_Total' 
+	union all
+	select counter_name, cntr_value, object_name
+	  from #after_perf_counters 
+	  where object_name like '%:Broker Statistics%'
+	  and counter_name in ('SQL SENDs/sec',
+				'SQL RECEIVEs/sec')
+	union all
+	select counter_name, cntr_value, object_name
+	  from #after_perf_counters 
+	  where object_name like '%:Wait Statistics%'
+	  and counter_name in ('Memory grant queue waits',
+				'Thread-safe memory objects waits',
+				'Log write waits',
+				'Log buffer waits',
+				'Network IO waits',
+				'Page latch waits',
+				'Wait for the worker')
+	  and instance_name = 'Average wait time (ms)'
+	union all
+	select counter_name, cntr_value, object_name
+	  from #after_perf_counters 
+	  where object_name like '%:SQL Errors%'
+	  and counter_name in ('Errors/sec')
+	  and instance_name = '_Total'
+	union all
+	select 'Buffer cache hit ratio - %' counter_name,
+         cast(((1 - ((select cast(sum(cntr_value) as decimal(38,2))                
+             from #after_perf_counters
+             where object_name like '%:Buffer Manager%'
+             and counter_name in (' Page writes/sec', 'Page reads/sec'))
+         / cast(cntr_value as decimal(38,2)))) * 100) as decimal(38,2)), object_name
+         from #after_perf_counters
+         where object_name like '%:Buffer Manager%'
+         and counter_name = 'Page lookups/sec'
+  	union all
+	select 'Plan cache hit ratio - %' counter_name,
+  		(((SELECT cntr_value FROM #after_perf_counters 
+  		WHERE counter_name = 'Cache Hit Ratio' 
+  		and object_name like '%:Plan Cache%'
+  		and instance_name = '_Total') * 1.0)/
+  		cntr_value) * 100.0 value, object_name
+  		from #after_perf_counters
+  		WHERE counter_name = 'Cache Hit Ratio Base' 
+  		and object_name like '%:Plan Cache%'
+  		and instance_name = '_Total'
+	
+	) monit_after
+	
+--- Monitoracao SO-CPU ---
+
+IF OBJECT_ID(N'tempdb..##monit_after_so_cpu_mondesv') IS NOT NULL
+	DROP TABLE ##monit_after_so_cpu_mondesv;
+
+if @ProductVersion = '2005'	
+	SELECT @SqlStatement = N'SELECT @cpu_ticksOUT = cpu_ticks / CONVERT (float, cpu_ticks_in_ms) FROM sys.dm_os_sys_info';
+	
+if @ProductVersion <> '2005'
+	SELECT @SqlStatement = N'SELECT @cpu_ticksOUT = cpu_ticks / (cpu_ticks/ms_ticks) FROM sys.dm_os_sys_info';
+	
+EXEC sp_executesql @SqlStatement, @SqlStatementParm, @cpu_ticksOUT=@cpu_ticks OUTPUT;
+	
+if @ProductVersion = '2005'	
+SET @SqlStatement = N'
+	select * into ##monit_after_so_cpu_mondesv
+	from
+	(
+	SELECT buf.processutilization, buf.systemidle, (100 - (buf.processutilization + buf.systemidle)) AS processother,
+	dateadd(millisecond, -datepart(millisecond, buf.[Record Time]), buf.[Record Time]) AS notification_time
+	FROM 
+	(
+	SELECT X.processutilization, X.systemidle, X.[Record Time] FROM
+	(SELECT 
+		DATEADD (ms, -1 * (' + CAST(@cpu_ticks as nvarchar(MAX)) + ' - [timestamp]), GETDATE()) AS [Record Time],
+		xml.value(''(//Record/SchedluerMonitorEvent/SystemHealth/ProcessUtilization)[1]'', ''int'') AS [processutilization],    
+		xml.value(''(//Record/SchedluerMonitorEvent/SystemHealth/SystemIdle)[1]'', ''int'') AS [systemidle]
+	FROM 
+	(
+	SELECT timestamp, CONVERT (xml, record) AS xml
+	FROM sys.dm_os_ring_buffers WITH (READUNCOMMITTED)
+	WHERE ring_buffer_type = ''RING_BUFFER_SCHEDULER_MONITOR'' AND record LIKE ''%<SystemHealth>%'') AS DataXML
+	UNION
+	SELECT 
+		DATEADD (ms, -1 * (' + CAST(@cpu_ticks as nvarchar(MAX)) + ' - [timestamp]), GETDATE()) AS [Record Time],
+		xml.value(''(//Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]'', ''int'') AS [processutilization],    
+		xml.value(''(//Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]'', ''int'') AS [systemidle]
+	FROM 
+	(
+	SELECT timestamp, CONVERT (xml, record) AS xml
+	FROM sys.dm_os_ring_buffers WITH (READUNCOMMITTED)
+	WHERE ring_buffer_type = ''RING_BUFFER_SCHEDULER_MONITOR'' AND record LIKE ''%<SystemHealth>%'') AS DataXML) AS X
+	WHERE X.processutilization is not null
+	) AS buf) monit_after_so_cpu';
+
+if @ProductVersion <> '2005'	
+SET @SqlStatement = N'
+	select * into ##monit_after_so_cpu_mondesv
+	from
+	(
+	SELECT buf.processutilization, buf.systemidle, (100 - (buf.processutilization + buf.systemidle)) AS processother,
+	dateadd(millisecond, -datepart(millisecond, buf.[Record Time]), buf.[Record Time]) AS notification_time
+	FROM 
+	(
+	SELECT X.[processutilization], X.[systemidle], X.[Record Time] FROM
+	(SELECT 
+		DATEADD (ms, -1 * (' + CAST(@cpu_ticks as nvarchar(MAX)) + ' - [timestamp]), GETDATE()) AS [Record Time],
+		xml.value(''(//Record/SchedluerMonitorEvent/SystemHealth/ProcessUtilization)[1]'', ''int'') AS [processutilization],    
+		xml.value(''(//Record/SchedluerMonitorEvent/SystemHealth/SystemIdle)[1]'', ''int'') AS [systemidle]
+	FROM 
+	(
+	SELECT timestamp, CONVERT (xml, record) AS xml
+	FROM sys.dm_os_ring_buffers WITH (READUNCOMMITTED)
+	WHERE ring_buffer_type = ''RING_BUFFER_SCHEDULER_MONITOR'' AND record LIKE ''%<SystemHealth>%'') AS DataXML
+	UNION
+	SELECT 
+		DATEADD (ms, -1 * (' + CAST(@cpu_ticks as nvarchar(MAX)) + ' - [timestamp]), GETDATE()) AS [Record Time],
+		xml.value(''(//Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]'', ''int'') AS [processutilization],    
+		xml.value(''(//Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]'', ''int'') AS [systemidle]
+	FROM 
+	(
+	SELECT timestamp, CONVERT (xml, record) AS xml
+	FROM sys.dm_os_ring_buffers WITH (READUNCOMMITTED)
+	WHERE ring_buffer_type = ''RING_BUFFER_SCHEDULER_MONITOR'' AND record LIKE ''%<SystemHealth>%'') AS DataXML) AS X
+	WHERE X.processutilization is not null
+	) AS buf) monit_after_so_cpu';
+	
+EXECUTE(@SqlStatement);
+
+--- Calculo de data/tempo ---	
+
+select @depois = getdate()
+
+select @sec = datediff(second, @now, @depois)
+
+
+--- Lock count depois ---
+insert into #monit_locks_mondesvio 
+select * from
+	(
+		select count(1) lockwait from sys.dm_exec_requests WITH (READUNCOMMITTED)
+		where blocking_session_id <>0) as lck,
+	(
+		select count(1) lockwait_5min from sys.dm_exec_requests WITH (READUNCOMMITTED)
+		where blocking_session_id <>0 and datediff(second,start_time,getdate()) > 5) as lck5
+
+
+
+----------------------------------------
+--- Retorna as informacoes para tela ---
+----------------------------------------
+
+BEGIN
+
+--- Monitoracao Geral ---
+
+
+SELECT * FROM (
+			SELECT 
+				RIGHT(LEFT(data,4),2) + '.'+ RIGHT(LEFT(data,7),2)+'.'+RIGHT(LEFT(data,10),2) AS DATE,
+				RIGHT(LEFT(data,13),2) + '.' + RIGHT(LEFT(data,16),2) + '.' + RIGHT(LEFT(data,19),2) AS TIME,
+				CAST(CONVERT(INT,ROUND(SUM(CASE counter_name WHEN 'Page lookups/sec' THEN value ELSE 0 END),0)) AS CHAR(15)) AS LOGICAL_IO,
+				CAST(CONVERT(INT,ROUND(SUM(CASE counter_name WHEN 'Page reads/sec' THEN value ELSE 0 END),0)) +
+				CONVERT(INT,ROUND(SUM(CASE counter_name WHEN 'Page writes/sec' THEN value ELSE 0 END),0)) AS CHAR (15)) AS PHYSICAL_IO,
+				CAST(CONVERT(INT,ROUND(SUM(CASE counter_name WHEN 'Batch Requests/sec' THEN value ELSE 0 END),0)) AS CHAR(10)) AS BATCHES,
+				CAST(SUM(CASE counter_name WHEN 'Buffer cache hit ratio - %' THEN value ELSE 0 END) AS CHAR(22)) AS BUFFER_CACHE_HIT_RATIO,
+				CAST(SUM(CASE counter_name WHEN 'Plan cache hit ratio - %' THEN value ELSE 0 END) AS CHAR(20)) AS PLAN_CACHE_HIT_RATIO,
+				CAST(CONVERT(INT,ROUND(SUM(CASE counter_name WHEN 'Transactions/sec' THEN value ELSE 0 END),0)) AS CHAR(20)) AS TRANSACTIONS_PER_SEC,
+				(SELECT CAST(ROUND(AVG(TOTAL_CONN),0)AS CHAR(10)) FROM #monit_session_mondesvio) AS TOTAL_CONN,
+				(SELECT CAST(ROUND(MAX(ACTIVE_CONN),0)AS CHAR(15)) FROM #monit_session_mondesvio) AS MAX_ACTIVE_CONN,
+				(SELECT CAST(ROUND(AVG(ACTIVE_CONN),0)AS CHAR(19)) FROM #monit_session_mondesvio) AS AVG_ACTIVE_SESSIONS,
+				(SELECT CAST(ROUND(AVG(lockwait),0)AS CHAR(8)) FROM #monit_locks_mondesvio) AS lockwait,
+				(SELECT CAST(ROUND(AVG(lockwait_5min),0)AS CHAR(13)) FROM #monit_locks_mondesvio) AS lockwait_5min,
+				CAST(CONVERT(INT,ROUND(SUM(CASE counter_name WHEN 'Total Server Memory (KB)' THEN value ELSE 0 END),0)) AS CHAR(15)) AS TOTAL_MEMORY_KB,
+				CAST(CONVERT(INT,ROUND(SUM(CASE counter_name WHEN 'Page life expectancy' THEN value ELSE 0 END),0)) AS CHAR(10)) AS PAGE_LIFE_EXPECTANCY,
+				CAST(CONVERT(INT,ROUND(SUM(CASE counter_name WHEN 'SQL Compilations/sec' THEN value ELSE 0 END),0)) AS CHAR(15)) AS COMPILES,
+				CAST(CONVERT(INT,ROUND(SUM(CASE counter_name WHEN 'SQL Re-Compilations/sec' THEN value ELSE 0 END),0)) AS CHAR(15)) AS RECOMPILES
+			FROM (
+				SELECT data, counter_name, SUM( CONVERT(DECIMAL(20,2), value)) AS value FROM 
+				(
+					select 
+						REPLACE(REPLACE(CONVERT(varchar,@now, 121), ':','.'), ' ', '-') as data,
+						RTRIM(LTRIM(counter_name)) as counter_name, LTRIM(STR(ROUND(value, 2),38,2)) as value, 
+						RTRIM(LTRIM(object_name)) as object_name 
+					from
+						(
+							select a.counter_name, 
+										CASE WHEN ((a.cntr_value - b.cntr_value) < 0)
+											THEN  (9223372036854775807 + ((a.cntr_value - b.cntr_value)) / @sec)
+											ELSE  ((a.cntr_value - b.cntr_value) / @sec) END as value, a.object_name 
+										from #monit_before_mondesvio b, 
+											#monit_after_mondesvio a
+										where a.counter_name = b.counter_name
+											and a.object_name = b.object_name
+											and b.counter_name in ( 'Page lookups/sec',
+														'Readahead pages/sec',
+														'Page reads/sec',
+														'Page writes/sec',
+														'Logins/sec',
+														'Logouts/sec',
+														'Page Splits/sec',
+														'Table Lock Escalations/sec',
+														'Lazy writes/sec',
+														'Transactions/sec',
+														'Lock Requests/sec',
+														'Lock Timeouts/sec',
+														'Number of Deadlocks/sec',
+														'Lock Waits/sec',
+														'Log Flushes/sec',
+														'Log Bytes Flushed/sec',
+														'Log Flush Waits/sec',
+														'Latch Waits/sec',
+														'Worktables Created/sec',
+														'SQL Compilations/sec',
+														'SQL Re-Compilations/sec',
+														'SQL SENDs/sec',
+														'SQL RECEIVEs/sec',
+														'Full Scans/sec',
+														'Index Searches/sec',
+														'Free list stalls/sec',
+														'Checkpoint pages/sec',
+														'Connection Reset/sec',
+														'Range Scans/sec',
+														'Probe Scans/sec',
+														'Transactions/sec',
+														'Batch Requests/sec',
+														'Errors/sec')
+										
+							union all
+		
+							select a.counter_name, ((a.cntr_value + b.cntr_value) / 2) as value, a.object_name 
+								from #monit_before_mondesvio b, 
+									 #monit_after_mondesvio a
+								where a.counter_name = b.counter_name
+								and a.object_name = b.object_name
+								and b.counter_name in ( 'Page life expectancy',
+														'Connection Memory (KB)',
+														'Lock Memory (KB)',
+														'Optimizer Memory (KB)',
+														'SQL Cache Memory (KB)',
+														'Total Server Memory (KB)',
+														'User Connections',
+														'Buffer cache hit ratio - %',
+														'Active Temp Tables',
+														'Processes blocked',
+														'Log Flush Wait Time',
+														'Cache Pages',
+														'Plan cache hit ratio - %',
+														'Cache Object Counts',
+														'Data File(s) Size (KB)',
+														'Log File(s) Size (KB)',
+														'Log File(s) Used Size (KB)',
+														'Memory grant queue waits',
+														'Thread-safe memory objects waits',
+														'Log write waits',
+														'Log buffer waits',
+														'Network IO waits',
+														'Page latch waits',
+														'Wait for the worker',
+														'Stolen pages',
+														'Buffer cache hit ratio base',
+														'Buffer cache hit ratio',
+														'Logical Connections',
+														'Non-atomic yield rate',
+														'Memory Grants Pending',
+														'Memory Grants Outstanding',
+														'Active Transactions',
+														'Cache Objects in use',
+														'Cache Hit Ratio',
+														'Cache Hit Ratio Base') 
+		
+					) result 
+				) AS RESULT_TMP
+		
+		WHERE counter_name IN (
+				'Page lookups/sec',
+				'Page reads/sec',
+				'Page writes/sec',
+				'Batch Requests/sec',
+				'Plan cache hit ratio - %',
+				'Transactions/sec',
+				'User Connections',
+				'Active Transactions',
+				'Buffer cache hit ratio - %',
+				'Total Server Memory (KB)',
+				'Page life expectancy',
+				'SQL Compilations/sec',
+				'SQL Re-Compilations/sec')
+				
+		GROUP BY counter_name, data
+) AS RESULT
+
+
+GROUP BY data ) AS A
+
+ , (select CAST(AVG(processutilization) AS CHAR(8))as USED_CPU , CAST(AVG(systemidle) AS CHAR(8)) IDLE_CPU
+from ##monit_after_so_cpu_mondesv 
+where notification_time > DATEADD(second,  	-1*(CONVERT(BIGINT, DATEPART(SECOND, '00:05:00')) +
+		(60*CONVERT(BIGINT, DATEPART(MINUTE, '00:05:00')))+
+		(60*60*CONVERT(BIGINT, DATEPART(HOUR, '00:05:00')))), GETDATE())) AS CPU_STUFF
+	
+END
+--- Remove temporarias ---
+
+DROP TABLE #monit_before_mondesvio; 
+DROP TABLE #monit_after_mondesvio;
+DROP TABLE ##monit_after_so_cpu_mondesv;
+DROP TABLE #monit_session_mondesvio;
+DROP TABLE #monit_locks_mondesvio;
+DROP TABLE #before_perf_counters;
+DROP TABLE #after_perf_counters;
+
+--- FIM ---
+
+
