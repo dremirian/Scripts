@@ -1,0 +1,70 @@
+IF EXISTS(SELECT 1 FROM sys.procedures 
+          WHERE Name = 'sp__act')
+BEGIN
+    DROP PROCEDURE dbo.sp__act
+END
+
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp__act] 
+WITH ENCRYPTION AS 
+
+SET NOCOUNT ON
+
+DECLARE @DT_MONIT DATETIME
+SET @DT_MONIT = getdate()	
+
+print ''
+print '========================================================='
+print @DT_MONIT
+print '========================================================='
+print ''
+print '========================================================='
+print 'Conexoes Ativas'
+print '========================================================='
+print ''
+
+SELECT	spid 			= s.session_id,
+		status 			= case when r.status is null then s.status when r.status is not null and r.blocking_session_id <> 0 then 'lockwait' else r.status end, 
+		isolation_level	= case  when s.transaction_isolation_level = 0 then 'Unspecified' 
+											when s.transaction_isolation_level = 1 then 'ReadUncommitted'
+											when s.transaction_isolation_level = 2 then 'ReadCommitted'
+											when s.transaction_isolation_level = 3 then 'Repeatable'
+											when s.transaction_isolation_level = 4 then 'Serializable'
+											when s.transaction_isolation_level = 5 then 'Snapshot'
+									  end, 
+		login_name		= case when s.login_name='' then CONVERT(char(40),s.original_login_name) else CONVERT(char(40), s.login_name) end,
+		wait_event		= CONVERT(char(50),(REPLACE(CONVERT(char(30),r.wait_type),' ', '') + '  (' + REPLACE(STR(r.wait_time, 8),' ', '') + ' ms)')) ,	
+		cmd				= CONVERT(char(10),r.command),
+		blk				= STR(r.blocking_session_id, 5),
+		tempdb_allocations_mb = tmp.tempdb_allocations_mb,
+		cpu				= STR(r.cpu_time, 6),
+		lreads			= STR(r.logical_reads, 11),
+		physical_io		= STR(r.reads + r.writes, 11),
+		program			= LEFT(s.program_name, 30),
+		hostname		= LEFT(s.host_name, 30),
+		client			= LEFT(s.client_interface_name,30),
+		client_address  = cn.client_net_address,
+		process			= s.host_process_id,
+		--last_dop		= CONVERT(char(5),st.last_dop),
+		--min_dop			= CONVERT(char(5),st.min_dop), 
+		--max_dop			= CONVERT(char(5),st.max_dop),
+		r.start_time 	
+	FROM sys.dm_exec_sessions s
+	LEFT JOIN sys.dm_exec_connections cn ON s.session_id = cn.session_id
+	LEFT JOIN 	sys.dm_exec_requests r  ON s.session_id = r.session_id
+	LEFT JOIN (SELECT tsu.session_id, tsu.request_id, CONVERT(DECIMAL(38,2), SUM( ((tsu.user_objects_alloc_page_count * 8) / 1024.) ) ) AS tempdb_allocations_mb FROM sys.dm_db_task_space_usage tsu group by tsu.session_id, tsu.request_id) as tmp on r.request_id = tmp.request_id AND r.session_id = tmp.session_id AND s.session_id = tmp.session_id
+	LEFT JOIN sys.dm_exec_query_stats st on r.plan_handle=st.plan_handle and r.sql_handle=st.sql_handle and r.statement_start_offset=st.statement_start_offset and r.statement_end_offset=st.statement_end_offset
+	WHERE 	s.session_id 	<> @@spid
+			and lower(r.status) not in('sleeping','background') 
+			and upper(r.command) not in ('AWAITING COMMAND','LAZY WRITER','CHECKPOINT SLEEP')
+ORDER BY s.session_id
+RETURN
+
+
+
+
