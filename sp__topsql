@@ -1,0 +1,938 @@
+IF EXISTS(SELECT 1 FROM sys.procedures WHERE TYPE = 'P' AND name = 'sp__topsql')
+BEGIN
+	DROP PROCEDURE sp__topsql
+END
+ 	
+	
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp__topsql] @DELAYMINUTES SMALLINT=1, @TYPEEXECUTION INT=1, @TB_FIRST_QUERY_EXECUTION VARCHAR(MAX) = NULL, @TB_FIRST_PROCEDURE_EXECUTION VARCHAR(MAX) = NULL, @TB_SECOND_QUERY_EXECUTION VARCHAR(MAX) = NULL, @TB_SECOND_PROCEDURE_EXECUTION VARCHAR(MAX) = NULL
+WITH ENCRYPTION AS 
+BEGIN
+	---------------------------------------------- Setando parametros Default ----------------------------------------------
+	
+	SET NOCOUNT ON;
+	IF @DELAYMINUTES NOT BETWEEN 1 AND 60
+	SET @DELAYMINUTES = 1
+	DECLARE @DT_MONIT DATETIME
+	SET @DT_MONIT = GETDATE()
+	DECLARE @TIMEMONITORING INT, 
+		@sql_1 varchar(512), 
+		@sql_2 varchar(512), 
+		@versao int
+	SELECT  @TIMEMONITORING = @DELAYMINUTES * 60
+	SELECT  @versao = SUBSTRING(@@version, 22,4)	
+	
+	IF @TYPEEXECUTION = 1
+		BEGIN
+			--------------------------------------- Dropando tabelAS temp cASo exista ---------------------------------------
+			
+			IF EXISTS (SELECT 1 FROM tempdb.sys.objects WHERE TYPE = 'U' AND name = 'tempsqlmon_dm_exec_query_stats')
+				DROP table tempdb..tempsqlmon_dm_exec_query_stats
+				
+			IF EXISTS (SELECT 1 FROM tempdb.sys.objects WHERE TYPE = 'U' AND name = 'tempsqlmon2_dm_exec_query_stats')
+				DROP table tempdb..tempsqlmon2_dm_exec_query_stats
+				
+			IF EXISTS (SELECT 1 FROM tempdb.sys.objects WHERE TYPE = 'U' AND name = 'tempsqlmon_dm_exec_PROCEDURE_stats')
+				DROP table tempdb..tempsqlmon_dm_exec_PROCEDURE_stats
+				
+			IF EXISTS (SELECT 1 FROM tempdb.sys.objects WHERE TYPE = 'U' AND name = 'tempsqlmon2_dm_exec_PROCEDURE_stats')
+				DROP table tempdb..tempsqlmon2_dm_exec_PROCEDURE_stats	
+				
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+			
+			SELECT * INTO tempdb..tempsqlmon_dm_exec_query_stats FROM sys.dm_exec_query_stats
+			CREATE INDEX IDX_temp_query_stats ON tempdb..tempsqlmon_dm_exec_query_stats(plan_handle)
+	
+			IF @versao > 2008
+			SELECT @sql_1 = 
+			'SELECT databASe_id, object_id, total_physical_reads, total_logical_reads, 
+					total_logical_writes, execution_count, last_logical_reads, last_logical_writes,
+					total_worker_time,last_worker_time, total_elapsed_time,last_elapsed_time  
+			INTO tempdb..tempsqlmon_dm_exec_PROCEDURE_stats 
+			FROM sys.dm_exec_PROCEDURE_stats
+			WHERE TYPE = ''P'' AND db_name(databASe_id) is NOT NULL
+			CREATE INDEX IDX_temp_dm_exec_PROCEDURE_stats ON tempdb..tempsqlmon_dm_exec_PROCEDURE_stats(object_id,databASe_id)'
+			EXEC (@sql_1)
+
+			---------------------------------------- Tempo de espera entre execuções ----------------------------------------
+			
+			DECLARE @WAIT VARCHAR(100)
+			SELECT @WAIT='WAITFOR delay ''00:'+right('0'+CONVERT(VARCHAR(2),@DELAYMINUTES),2)+':00'''
+			EXEC (@WAIT)	
+
+			----------------------------------------- Coletando Waits da 2º chamada -----------------------------------------
+			
+			SELECT * INTO tempdb..tempsqlmon2_dm_exec_query_stats FROM sys.dm_exec_query_stats
+			CREATE INDEX IDX_temp2_query_stats ON tempdb..tempsqlmon2_dm_exec_query_stats(plan_handle)
+
+			IF @versao > 2008
+			SELECT @sql_2 = 
+			'SELECT databASe_id, object_id, total_physical_reads, total_logical_reads, 
+					total_logical_writes, execution_count, last_logical_reads, last_logical_writes,
+					total_worker_time,last_worker_time, total_elapsed_time,last_elapsed_time  
+			INTO tempdb..tempsqlmon2_dm_exec_PROCEDURE_stats 
+			FROM sys.dm_exec_PROCEDURE_stats
+			WHERE TYPE = ''P'' AND db_name(databASe_id) is NOT NULL
+			CREATE INDEX IDX_temp2_dm_exec_PROCEDURE_stats ON tempdb..tempsqlmon2_dm_exec_PROCEDURE_stats(object_id,databASe_id)'
+			EXEC (@sql_2)
+			
+			-------------------------------- Relatório - TOP 20 Query Stats - Logical Reads --------------------------------
+			
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT @DT_MONIT
+			PRINT '=============================================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 20 - QUERY STATS - LOGICAL READS ' + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+			PRINT '=============================================================================='
+			PRINT ''
+
+			SELECT TOP 20 
+				CASE 
+					WHEN ((qs.execution_count - tqs.execution_count) < 0)  
+					THEN (9233372036854775807 + ((qs.execution_count - tqs.execution_count)))
+					ELSE (qs.execution_count - tqs.execution_count)
+				END  AS Exec_cnt,
+				CASE 
+					WHEN ((qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+					THEN (9233372036854775807 + ((qs.total_logical_reads - tqs.total_logical_reads)))
+					ELSE (qs.total_logical_reads - tqs.total_logical_reads)
+				END  AS Total_LIO_reads,
+				qs.last_logical_reads AS Last_LIO_reads,
+				CASE 
+					WHEN ((qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+					THEN (9233372036854775807 + ((qs.total_logical_writes - tqs.total_logical_writes)))
+					ELSE (qs.total_logical_writes - tqs.total_logical_writes)
+				END  AS Total_LIO_writes,
+				qs.last_logical_writes AS Last_LIO_writes,
+				CASE 
+					WHEN (((qs.total_worker_time - tqs.total_worker_time) / 1000) < 0)  
+					THEN (9233372036854775807 + ((qs.total_worker_time - tqs.total_worker_time) / 1000))
+					ELSE ((qs.total_worker_time - tqs.total_worker_time) / 1000)
+				END  AS Total_CPU_time_ms,
+				qs.last_worker_time / 1000 AS Last_CPU_time_ms,
+				CASE 
+					WHEN (((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000) < 0)  
+					THEN (9233372036854775807 + ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000))
+					ELSE ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000)
+				END  AS Total_elapsed_time_ms,
+				qs.last_elapsed_time / 1000 AS Last_elapsed_time_ms,
+				qs.last_execution_time AS Last_EXEC,
+				REPLACE (
+				REPLACE (
+				REPLACE (
+				SUBSTRING(
+					qt.TEXT
+				, (qs.statement_start_offset / 2) + 1
+				, ((CASE qs.statement_end_offset WHEN - 1 
+					THEN DATALENGTH(qt.TEXT) 
+					ELSE qs.statement_end_offset END - qs.statement_start_offset) / 2) 
+				+ 1), 
+				CHAR(13) + CHAR(10), ' '), 
+				CHAR(9), ' '),
+				CHAR(10), ' ') AS SQL_TEXT
+			FROM tempdb..tempsqlmon2_dm_exec_query_stats qs
+			INNER JOIN tempdb..tempsqlmon_dm_exec_query_stats tqs on qs.plan_handle=tqs.plan_handle AND qs.sql_handle=tqs.sql_handle AND qs.statement_end_offset=tqs.statement_end_offset AND qs.statement_start_offset=tqs.statement_start_offset
+			CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+			WHERE (qs.execution_count - tqs.execution_count) > 0 AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+			ORDER BY (qs.total_logical_reads - tqs.total_logical_reads) DESC
+
+			-------------------------------- Relatório - TOP 20 Query Stats - Execution Count --------------------------------
+
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT @DT_MONIT
+			PRINT '=============================================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 20 - QUERY STATS - EXECUTION COUNT ' + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+			PRINT '=============================================================================='	
+			PRINT ''
+
+			SELECT TOP 20 
+				CASE 
+					WHEN ((qs.execution_count - tqs.execution_count) < 0)  
+					THEN (9233372036854775807 + ((qs.execution_count - tqs.execution_count)))
+					ELSE (qs.execution_count - tqs.execution_count)
+				END  AS Exec_cnt,
+				CASE 
+					WHEN ((qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+					THEN (9233372036854775807 + ((qs.total_logical_reads - tqs.total_logical_reads)))
+					ELSE (qs.total_logical_reads - tqs.total_logical_reads)
+				END  AS Total_LIO_reads,
+				qs.last_logical_reads AS Last_LIO_reads,
+				CASE 
+					WHEN ((qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+					THEN (9233372036854775807 + ((qs.total_logical_writes - tqs.total_logical_writes)))
+					ELSE (qs.total_logical_writes - tqs.total_logical_writes)
+				END  AS Total_LIO_writes,
+				qs.last_logical_writes AS Last_LIO_writes,
+				CASE 
+					WHEN (((qs.total_worker_time - tqs.total_worker_time) / 1000) < 0)  
+					THEN (9233372036854775807 + ((qs.total_worker_time - tqs.total_worker_time) / 1000))
+					ELSE ((qs.total_worker_time - tqs.total_worker_time) / 1000)
+				END  AS Total_CPU_time_ms,
+				qs.last_worker_time / 1000 AS Last_CPU_time_ms,
+				CASE 
+					WHEN (((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000) < 0)  
+					THEN (9233372036854775807 + ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000))
+					ELSE ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000)
+				END  AS Total_elapsed_time_ms,
+				qs.last_elapsed_time / 1000 AS Last_elapsed_time_ms,
+				qs.last_execution_time AS Last_EXEC,
+				REPLACE (
+				REPLACE (
+				REPLACE (
+				SUBSTRING(
+					qt.TEXT
+				, (qs.statement_start_offset / 2) + 1
+				, ((CASE qs.statement_end_offset WHEN - 1 
+					THEN DATALENGTH(qt.TEXT) 
+					ELSE qs.statement_end_offset END - qs.statement_start_offset) / 2) 
+				+ 1), 
+				CHAR(13) + CHAR(10), ' '), 
+				CHAR(9), ' '),
+				CHAR(10), ' ') AS SQL_TEXT
+			FROM tempdb..tempsqlmon2_dm_exec_query_stats qs
+			INNER JOIN tempdb..tempsqlmon_dm_exec_query_stats tqs on qs.plan_handle=tqs.plan_handle AND qs.sql_handle=tqs.sql_handle AND qs.statement_end_offset=tqs.statement_end_offset AND qs.statement_start_offset=tqs.statement_start_offset
+			CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+			WHERE (qs.execution_count - tqs.execution_count) > 0 AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+			ORDER BY (qs.execution_count - tqs.execution_count) DESC
+
+			----------------------------------- Relatório - TOP 20 Query Stats - CPU Time -----------------------------------
+			
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT @DT_MONIT
+			PRINT '=============================================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 20 - QUERY STATS - CPU TIME ' + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+			PRINT '=============================================================================='	
+			PRINT ''
+
+			SELECT TOP 20 
+				CASE 
+					WHEN ((qs.execution_count - tqs.execution_count) < 0)  
+					THEN (9233372036854775807 + ((qs.execution_count - tqs.execution_count)))
+					ELSE (qs.execution_count - tqs.execution_count)
+				END  AS Exec_cnt,
+				CASE 
+					WHEN ((qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+					THEN (9233372036854775807 + ((qs.total_logical_reads - tqs.total_logical_reads)))
+					ELSE (qs.total_logical_reads - tqs.total_logical_reads)
+				END  AS Total_LIO_reads,
+				qs.last_logical_reads AS Last_LIO_reads,
+				CASE 
+					WHEN ((qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+					THEN (9233372036854775807 + ((qs.total_logical_writes - tqs.total_logical_writes)))
+					ELSE (qs.total_logical_writes - tqs.total_logical_writes)
+				END  AS Total_LIO_writes,
+				qs.last_logical_writes AS Last_LIO_writes,
+				CASE 
+					WHEN (((qs.total_worker_time - tqs.total_worker_time) / 1000) < 0)  
+					THEN (9233372036854775807 + ((qs.total_worker_time - tqs.total_worker_time) / 1000))
+					ELSE ((qs.total_worker_time - tqs.total_worker_time) / 1000)
+				END  AS Total_CPU_time_ms,
+				qs.last_worker_time / 1000 AS Last_CPU_time_ms,
+				CASE 
+					WHEN (((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000) < 0)  
+					THEN (9233372036854775807 + (CAST((qs.total_elapsed_time - tqs.total_elapsed_time) AS BIGINT) / 1000))
+					ELSE ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000)
+				END  AS Total_elapsed_time_ms,
+				qs.last_elapsed_time / 1000 AS Last_elapsed_time_ms,
+				qs.last_execution_time AS Last_exec,
+				REPLACE (
+				REPLACE (
+				REPLACE (
+				SUBSTRING(
+					qt.TEXT
+				, (qs.statement_start_offset / 2) + 1
+				, ((CASE qs.statement_end_offset WHEN - 1 
+					THEN DATALENGTH(qt.TEXT) 
+					ELSE qs.statement_end_offset END - qs.statement_start_offset) / 2) 
+				+ 1), 
+				CHAR(13) + CHAR(10), ' '), 
+				CHAR(9), ' '),
+				CHAR(10), ' ') AS SQL_TEXT
+			FROM tempdb..tempsqlmon2_dm_exec_query_stats qs
+			INNER JOIN tempdb..tempsqlmon_dm_exec_query_stats tqs on qs.plan_handle=tqs.plan_handle AND qs.sql_handle=tqs.sql_handle AND qs.statement_end_offset=tqs.statement_end_offset AND qs.statement_start_offset=tqs.statement_start_offset
+			CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+			WHERE (qs.execution_count - tqs.execution_count) > 0 AND (qs.total_logical_reads - tqs.total_logical_reads) > 0 AND (qs.total_worker_time - tqs.total_worker_time) > 0
+			ORDER BY (qs.total_worker_time - tqs.total_worker_time) DESC
+
+			IF @versao > 2008
+				BEGIN
+					------------------------------ Relatório - TOP 20 Procedure Stats - Logical Reads ------------------------------
+				
+					PRINT ''
+					PRINT '=============================================================================='
+					PRINT @DT_MONIT
+					PRINT '=============================================================================='
+					PRINT ''
+					PRINT ''
+					PRINT '==============================================================================' 
+					PRINT 'TOP 20 - PROCEDURE STATS - LOGICAL READS ' + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+					PRINT '=============================================================================='
+					PRINT ''
+					
+					SELECT TOP 20 
+							convert(varchar(30),db_name(qs.databASe_id)) AS DB_name,
+							convert(varchar(50),OBJECT_NAME(qs.object_id,qs.databASe_id)) AS SP_name,
+							CASE 
+								WHEN (SUM(qs.execution_count - tqs.execution_count) < 0)  
+								THEN (9233372036854775807 + (SUM(qs.execution_count - tqs.execution_count)))
+								ELSE SUM(qs.execution_count - tqs.execution_count)
+							END  AS Exec_cnt,
+							CASE 
+								WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+								THEN (9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads)))
+								ELSE SUM(qs.total_logical_reads - tqs.total_logical_reads)
+							END  AS Total_LIO_reads,
+							CASE 
+								WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads))) / @TIMEMONITORING AS BIGINT)
+								ELSE CAST(SUM(qs.total_logical_reads - tqs.total_logical_reads) / @TIMEMONITORING AS BIGINT)
+							END  AS Avg_LIO_reads_per_sec,
+							CASE 
+								WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+								THEN (9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes)))
+								ELSE SUM(qs.total_logical_writes - tqs.total_logical_writes)
+							END  AS Total_LIO_writes,
+									CASE 
+								WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes))) / @TIMEMONITORING AS BIGINT)
+								ELSE CAST(SUM(qs.total_logical_writes - tqs.total_logical_writes) / @TIMEMONITORING AS BIGINT)
+							END  AS Avg_LIO_writes_per_sec,
+							CASE 
+								WHEN ((SUM(qs.total_worker_time - tqs.total_worker_time)) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_worker_time - tqs.total_worker_time))) / 1000 AS BIGINT)
+								ELSE CAST((SUM(qs.total_worker_time - tqs.total_worker_time)) / 1000 AS BIGINT)
+							END  AS Total_CPU_time_ms,
+							CASE 
+								WHEN ((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_elapsed_time - tqs.total_elapsed_time))) / 1000 AS BIGINT)
+								ELSE CAST((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) / 1000 AS BIGINT)
+							END  AS Total_elapsed_time_ms
+						FROM tempdb..tempsqlmon2_dm_exec_PROCEDURE_stats qs
+						INNER JOIN tempdb..tempsqlmon_dm_exec_PROCEDURE_stats tqs on qs.object_id=tqs.object_id AND qs.databASe_id=tqs.databASe_id
+						WHERE (qs.execution_count - tqs.execution_count) > 0 
+						AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+						AND OBJECT_NAME(qs.object_id,qs.databASe_id) is NOT NULL 
+						AND db_name(qs.databASe_id) is NOT NULL
+						group by qs.databASe_id, qs.object_id
+						ORDER BY 4 DESC
+
+					----------------------------- Relatório - TOP 20 Procedure Stats - Execution Count -----------------------------
+			
+					PRINT ''
+					PRINT '=============================================================================='
+					PRINT @DT_MONIT
+					PRINT '=============================================================================='
+					PRINT ''
+					PRINT ''
+					PRINT '=============================================================================='
+					PRINT 'TOP 20 - PROCEDURE STATS - EXECUTION COUNT ' + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+					PRINT '=============================================================================='
+					PRINT ''
+					
+					SELECT TOP 20 
+							convert(varchar(30),db_name(qs.databASe_id)) AS DB_name,
+							convert(varchar(50),OBJECT_NAME(qs.object_id,qs.databASe_id)) AS SP_name,
+							CASE 
+								WHEN (SUM(qs.execution_count - tqs.execution_count) < 0)  
+								THEN (9233372036854775807 + (SUM(qs.execution_count - tqs.execution_count)))
+								ELSE SUM(qs.execution_count - tqs.execution_count)
+							END  AS Exec_cnt,
+							CASE 
+								WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+								THEN (9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads)))
+								ELSE SUM(qs.total_logical_reads - tqs.total_logical_reads)
+							END  AS Total_LIO_reads,
+							CASE 
+								WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads))) / @TIMEMONITORING AS BIGINT)
+								ELSE CAST(SUM(qs.total_logical_reads - tqs.total_logical_reads) / @TIMEMONITORING AS BIGINT)
+							END  AS Avg_LIO_reads_per_sec,
+							CASE 
+								WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+								THEN (9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes)))
+								ELSE SUM(qs.total_logical_writes - tqs.total_logical_writes)
+							END  AS Total_LIO_writes,
+									CASE 
+								WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes))) / @TIMEMONITORING AS BIGINT)
+								ELSE CAST(SUM(qs.total_logical_writes - tqs.total_logical_writes) / @TIMEMONITORING AS BIGINT)
+							END  AS Avg_LIO_writes_per_sec,
+							CASE 
+								WHEN ((SUM(qs.total_worker_time - tqs.total_worker_time)) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_worker_time - tqs.total_worker_time))) / 1000 AS BIGINT)
+								ELSE CAST((SUM(qs.total_worker_time - tqs.total_worker_time)) / 1000 AS BIGINT)
+							END  AS Total_CPU_time_ms,
+							CASE 
+								WHEN ((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_elapsed_time - tqs.total_elapsed_time))) / 1000 AS BIGINT)
+								ELSE CAST((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) / 1000 AS BIGINT)
+							END  AS Total_elapsed_time_ms
+						FROM tempdb..tempsqlmon2_dm_exec_PROCEDURE_stats qs
+						INNER JOIN tempdb..tempsqlmon_dm_exec_PROCEDURE_stats tqs on qs.object_id=tqs.object_id AND qs.databASe_id=tqs.databASe_id
+						WHERE (qs.execution_count - tqs.execution_count) > 0 
+						AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+						AND OBJECT_NAME(qs.object_id,qs.databASe_id) is NOT NULL 
+						AND db_name(qs.databASe_id) is NOT NULL
+						group by qs.databASe_id, qs.object_id
+						ORDER BY 3 DESC
+
+					-------------------------------- Relatório - TOP 20 Procedure Stats - CPU Time --------------------------------
+					
+					PRINT ''
+					PRINT '=============================================================================='
+					PRINT @DT_MONIT
+					PRINT '=============================================================================='
+					PRINT ''
+					PRINT ''
+					PRINT '=============================================================================='
+					PRINT 'TOP 20 - PROCEDURE STATS - CPU TIME ' + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+					PRINT '=============================================================================='
+					PRINT ''
+					
+					SELECT TOP 20 
+							convert(varchar(30),db_name(qs.databASe_id)) AS DB_name,
+							convert(varchar(50),OBJECT_NAME(qs.object_id,qs.databASe_id)) AS SP_name,
+							CASE 
+								WHEN (SUM(qs.execution_count - tqs.execution_count) < 0)  
+								THEN (9233372036854775807 + (SUM(qs.execution_count - tqs.execution_count)))
+								ELSE SUM(qs.execution_count - tqs.execution_count)
+							END  AS Exec_cnt,
+							CASE 
+								WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+								THEN (9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads)))
+								ELSE SUM(qs.total_logical_reads - tqs.total_logical_reads)
+							END  AS Total_LIO_reads,
+							CASE 
+								WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads))) / @TIMEMONITORING AS BIGINT)
+								ELSE CAST(SUM(qs.total_logical_reads - tqs.total_logical_reads) / @TIMEMONITORING AS BIGINT)
+							END  AS Avg_LIO_reads_per_sec,
+							CASE 
+								WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+								THEN (9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes)))
+								ELSE SUM(qs.total_logical_writes - tqs.total_logical_writes)
+							END  AS Total_LIO_writes,
+									CASE 
+								WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes))) / @TIMEMONITORING AS BIGINT)
+								ELSE CAST(SUM(qs.total_logical_writes - tqs.total_logical_writes) / @TIMEMONITORING AS BIGINT)
+							END  AS Avg_LIO_writes_per_sec,
+							CASE 
+								WHEN ((SUM(qs.total_worker_time - tqs.total_worker_time)) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_worker_time - tqs.total_worker_time)))/ 1000 AS BIGINT)
+								ELSE CAST((SUM(qs.total_worker_time - tqs.total_worker_time))/ 1000 AS BIGINT)
+							END  AS Total_CPU_time_ms,
+							CASE 
+								WHEN ((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) < 0)  
+								THEN CAST((9233372036854775807 + (SUM(qs.total_elapsed_time - tqs.total_elapsed_time))) / 1000 AS BIGINT)
+								ELSE CAST((SUM(qs.total_elapsed_time - tqs.total_elapsed_time))/ 1000 AS BIGINT)
+							END  AS Total_elapsed_time_ms
+						FROM tempdb..tempsqlmon2_dm_exec_PROCEDURE_stats qs
+						INNER JOIN tempdb..tempsqlmon_dm_exec_PROCEDURE_stats tqs on qs.object_id=tqs.object_id AND qs.databASe_id=tqs.databASe_id
+						WHERE (qs.execution_count - tqs.execution_count) > 0 
+						AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+						AND OBJECT_NAME(qs.object_id,qs.databASe_id) is NOT NULL 
+						AND db_name(qs.databASe_id) is NOT NULL
+						group by qs.databASe_id, qs.object_id
+						ORDER BY 8 DESC	
+						
+
+					END
+
+				
+				------------------------------------------------ Fim da Execução ------------------------------------------------
+			END
+	ELSE IF @TYPEEXECUTION = 2 -- Type Execution 02 --  Execução da 1º chamada para coleta de dados correntes
+		BEGIN
+			DECLARE @COLLECT_FIRST_QUERY_EXECUTION VARCHAR(MAX);
+			DECLARE @COLLECT_FIRST_PROCEDURE_EXECUTION VARCHAR(MAX);
+			DECLARE @DROP_TB_QUERY_01_OLD VARCHAR(MAX);
+			DECLARE @DROP_TB_PROCEDURE_01_OLD VARCHAR(MAX);
+
+			--------------------------------------- Dropando tabela temp caso exista ---------------------------------------
+			
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_FIRST_QUERY_EXECUTION)
+				SELECT @DROP_TB_QUERY_01_OLD='DROP TABLE tempdb..'+@TB_FIRST_QUERY_EXECUTION+';'
+				
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_FIRST_PROCEDURE_EXECUTION)
+				SELECT @DROP_TB_PROCEDURE_01_OLD='DROP TABLE tempdb..'+@TB_FIRST_PROCEDURE_EXECUTION+';'
+
+			EXEC (@DROP_TB_QUERY_01_OLD)
+			EXEC (@DROP_TB_PROCEDURE_01_OLD)
+				
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+			
+			SET @COLLECT_FIRST_QUERY_EXECUTION='USE tempdb;SELECT * INTO ' + @TB_FIRST_QUERY_EXECUTION + ' FROM sys.dm_exec_query_stats
+			CREATE INDEX IDX_temp_query_stats ON ' + @TB_FIRST_QUERY_EXECUTION + ' (plan_handle)'
+			
+			SET @COLLECT_FIRST_PROCEDURE_EXECUTION='USE tempdb;SELECT databASe_id, object_id, total_physical_reads, total_logical_reads, 
+			total_logical_writes, execution_count, last_logical_reads, last_logical_writes,
+			total_worker_time,last_worker_time, total_elapsed_time,last_elapsed_time  
+			INTO ' + @TB_FIRST_PROCEDURE_EXECUTION + ' FROM sys.dm_exec_PROCEDURE_stats WHERE TYPE = ''P'' AND db_name(databASe_id) is NOT NULL
+			CREATE INDEX IDX_temp_dm_exec_PROCEDURE_stats ON ' + @TB_FIRST_PROCEDURE_EXECUTION + ' (object_id,databASe_id)'
+			
+			EXEC (@COLLECT_FIRST_QUERY_EXECUTION)
+			EXEC (@COLLECT_FIRST_PROCEDURE_EXECUTION)
+						
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+	ELSE IF @TYPEEXECUTION = 3 -- Type Execution 03 -- Execução da 2º chamada para comparação com a 1º
+		BEGIN
+			DECLARE @COLLECT_SECOND_QUERY_EXECUTION VARCHAR(MAX);
+			DECLARE @COLLECT_SECOND_PROCEDURE_EXECUTION VARCHAR(MAX);
+			DECLARE @DROP_TB_QUERY_01 VARCHAR(MAX);
+			DECLARE @DROP_TB_QUERY_02 VARCHAR(MAX);
+			DECLARE @DROP_TB_PROCEDURE_01 VARCHAR(MAX);
+			DECLARE @DROP_TB_PROCEDURE_02 VARCHAR(MAX);
+			DECLARE @REPORT_QUERY_LOGICALREAD VARCHAR(MAX);
+			DECLARE @REPORT_QUERY_EXECUTIONCOUNT VARCHAR(MAX);
+			DECLARE @REPORT_QUERY_CPUTIME VARCHAR(MAX);
+			DECLARE @REPORT_PROCEDURE_LOGICALREAD VARCHAR(MAX);
+			DECLARE @REPORT_PROCEDURE_EXECUTIONCOUNT VARCHAR(MAX);
+			DECLARE @REPORT_PROCEDURE_CPUTIME VARCHAR(MAX);
+			DECLARE @DROP_TB_QUERY_02_OLD VARCHAR(MAX);
+			DECLARE @DROP_TB_PROCEDURE_02_OLD VARCHAR(MAX);
+
+			--------------------------------------- Dropando tabela temp caso exista ---------------------------------------
+			
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_SECOND_QUERY_EXECUTION)
+				SELECT @DROP_TB_QUERY_02_OLD='DROP TABLE tempdb..'+@TB_SECOND_QUERY_EXECUTION+';'
+				
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_SECOND_PROCEDURE_EXECUTION)
+				SELECT @DROP_TB_PROCEDURE_02_OLD='DROP TABLE tempdb..'+@TB_SECOND_PROCEDURE_EXECUTION+';'
+
+			EXEC (@DROP_TB_QUERY_02_OLD)
+			EXEC (@DROP_TB_PROCEDURE_02_OLD)
+
+			
+			----------------------------------------- Coletando Waits da 2º chamada -----------------------------------------
+			
+			SET @COLLECT_SECOND_QUERY_EXECUTION='USE tempdb;SELECT * INTO ' + @TB_SECOND_QUERY_EXECUTION + ' FROM sys.dm_exec_query_stats
+			CREATE INDEX IDX_temp_query_stats ON ' + @TB_SECOND_QUERY_EXECUTION + ' (plan_handle)'
+			
+			SET @COLLECT_SECOND_PROCEDURE_EXECUTION='USE tempdb;SELECT databASe_id, object_id, total_physical_reads, total_logical_reads, 
+			total_logical_writes, execution_count, last_logical_reads, last_logical_writes,
+			total_worker_time,last_worker_time, total_elapsed_time,last_elapsed_time  
+			INTO ' + @TB_SECOND_PROCEDURE_EXECUTION + ' FROM sys.dm_exec_PROCEDURE_stats WHERE TYPE = ''P'' AND db_name(databASe_id) is NOT NULL
+			CREATE INDEX IDX_temp_dm_exec_PROCEDURE_stats ON ' + @TB_SECOND_PROCEDURE_EXECUTION + ' (object_id,databASe_id)'
+			
+			EXEC (@COLLECT_SECOND_QUERY_EXECUTION)
+			EXEC (@COLLECT_SECOND_PROCEDURE_EXECUTION)
+			
+			-------------------------------- Relatório - TOP 20 Query Stats - Logical Reads --------------------------------
+			
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT @DT_MONIT
+			PRINT '=============================================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 20 - QUERY STATS - LOGICAL READS '
+			PRINT '=============================================================================='
+			PRINT ''
+			
+			SET @REPORT_QUERY_LOGICALREAD='USE tempdb;SELECT TOP 20 
+					CASE 
+						WHEN ((qs.execution_count - tqs.execution_count) < 0)  
+						THEN (9233372036854775807 + ((qs.execution_count - tqs.execution_count)))
+						ELSE (qs.execution_count - tqs.execution_count)
+					END  AS Exec_cnt,
+					CASE 
+						WHEN ((qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+						THEN (9233372036854775807 + ((qs.total_logical_reads - tqs.total_logical_reads)))
+						ELSE (qs.total_logical_reads - tqs.total_logical_reads)
+					END  AS Total_LIO_reads,
+					qs.last_logical_reads AS Last_LIO_reads,
+					CASE 
+						WHEN ((qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+						THEN (9233372036854775807 + ((qs.total_logical_writes - tqs.total_logical_writes)))
+						ELSE (qs.total_logical_writes - tqs.total_logical_writes)
+					END  AS Total_LIO_writes,
+					qs.last_logical_writes AS Last_LIO_writes,
+					CASE 
+						WHEN (((qs.total_worker_time - tqs.total_worker_time) / 1000) < 0)  
+						THEN (9233372036854775807 + ((qs.total_worker_time - tqs.total_worker_time) / 1000))
+						ELSE ((qs.total_worker_time - tqs.total_worker_time) / 1000)
+					END  AS Total_CPU_time_ms,
+					qs.last_worker_time / 1000 AS Last_CPU_time_ms,
+					CASE 
+						WHEN (((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000) < 0)  
+						THEN (9233372036854775807 + ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000))
+						ELSE ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000)
+					END  AS Total_elapsed_time_ms,
+					qs.last_elapsed_time / 1000 AS Last_elapsed_time_ms,
+					qs.last_execution_time AS Last_EXEC,
+					REPLACE (
+					REPLACE (
+					REPLACE (
+					SUBSTRING(
+						qt.TEXT
+					, (qs.statement_start_offset / 2) + 1
+					, ((CASE qs.statement_end_offset WHEN - 1 
+						THEN DATALENGTH(qt.TEXT) 
+						ELSE qs.statement_end_offset END - qs.statement_start_offset) / 2) 
+					+ 1), 
+					CHAR(13) + CHAR(10), '' ''), 
+					CHAR(9), '' ''),
+					CHAR(10), '' '') AS SQL_TEXT
+				FROM ' + @TB_SECOND_QUERY_EXECUTION + ' qs
+				INNER JOIN ' + @TB_FIRST_QUERY_EXECUTION + ' tqs on qs.plan_handle=tqs.plan_handle AND qs.sql_handle=tqs.sql_handle AND qs.statement_end_offset=tqs.statement_end_offset AND qs.statement_start_offset=tqs.statement_start_offset
+				CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+				WHERE (qs.execution_count - tqs.execution_count) > 0 AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+				ORDER BY (qs.total_logical_reads - tqs.total_logical_reads) DESC'
+				
+			EXEC (@REPORT_QUERY_LOGICALREAD)
+
+			-------------------------------- Relatório - TOP 20 Query Stats - Execution Count --------------------------------
+
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT @DT_MONIT
+			PRINT '=============================================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 20 - QUERY STATS - EXECUTION COUNT '
+			PRINT '=============================================================================='	
+			PRINT ''
+
+			SET @REPORT_QUERY_EXECUTIONCOUNT='USE tempdb;SELECT TOP 20 
+					CASE 
+						WHEN ((qs.execution_count - tqs.execution_count) < 0)  
+						THEN (9233372036854775807 + ((qs.execution_count - tqs.execution_count)))
+						ELSE (qs.execution_count - tqs.execution_count)
+					END  AS Exec_cnt,
+					CASE 
+						WHEN ((qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+						THEN (9233372036854775807 + ((qs.total_logical_reads - tqs.total_logical_reads)))
+						ELSE (qs.total_logical_reads - tqs.total_logical_reads)
+					END  AS Total_LIO_reads,
+					qs.last_logical_reads AS Last_LIO_reads,
+					CASE 
+						WHEN ((qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+						THEN (9233372036854775807 + ((qs.total_logical_writes - tqs.total_logical_writes)))
+						ELSE (qs.total_logical_writes - tqs.total_logical_writes)
+					END  AS Total_LIO_writes,
+					qs.last_logical_writes AS Last_LIO_writes,
+					CASE 
+						WHEN (((qs.total_worker_time - tqs.total_worker_time) / 1000) < 0)  
+						THEN (9233372036854775807 + ((qs.total_worker_time - tqs.total_worker_time) / 1000))
+						ELSE ((qs.total_worker_time - tqs.total_worker_time) / 1000)
+					END  AS Total_CPU_time_ms,
+					qs.last_worker_time / 1000 AS Last_CPU_time_ms,
+					CASE 
+						WHEN (((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000) < 0)  
+						THEN (9233372036854775807 + ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000))
+						ELSE ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000)
+					END  AS Total_elapsed_time_ms,
+					qs.last_elapsed_time / 1000 AS Last_elapsed_time_ms,
+					qs.last_execution_time AS Last_EXEC,
+					REPLACE (
+					REPLACE (
+					REPLACE (
+					SUBSTRING(
+						qt.TEXT
+					, (qs.statement_start_offset / 2) + 1
+					, ((CASE qs.statement_end_offset WHEN - 1 
+						THEN DATALENGTH(qt.TEXT) 
+						ELSE qs.statement_end_offset END - qs.statement_start_offset) / 2) 
+					+ 1), 
+					CHAR(13) + CHAR(10), '' ''), 
+					CHAR(9), '' ''),
+					CHAR(10), '' '') AS SQL_TEXT
+				FROM ' + @TB_SECOND_QUERY_EXECUTION + ' qs
+				INNER JOIN ' + @TB_FIRST_QUERY_EXECUTION + ' tqs on qs.plan_handle=tqs.plan_handle AND qs.sql_handle=tqs.sql_handle AND qs.statement_end_offset=tqs.statement_end_offset AND qs.statement_start_offset=tqs.statement_start_offset
+				CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+				WHERE (qs.execution_count - tqs.execution_count) > 0 AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+				ORDER BY (qs.execution_count - tqs.execution_count) DESC'
+
+			EXEC (@REPORT_QUERY_EXECUTIONCOUNT)
+
+			----------------------------------- Relatório - TOP 20 Query Stats - CPU Time -----------------------------------
+			
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT @DT_MONIT
+			PRINT '=============================================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 20 - QUERY STATS - CPU TIME '
+			PRINT '=============================================================================='	
+			PRINT ''
+
+			SET @REPORT_QUERY_CPUTIME='USE tempdb;SELECT TOP 20 
+					CASE 
+						WHEN ((qs.execution_count - tqs.execution_count) < 0)  
+						THEN (9233372036854775807 + ((qs.execution_count - tqs.execution_count)))
+						ELSE (qs.execution_count - tqs.execution_count)
+					END  AS Exec_cnt,
+					CASE 
+						WHEN ((qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+						THEN (9233372036854775807 + ((qs.total_logical_reads - tqs.total_logical_reads)))
+						ELSE (qs.total_logical_reads - tqs.total_logical_reads)
+					END  AS Total_LIO_reads,
+					qs.last_logical_reads AS Last_LIO_reads,
+					CASE 
+						WHEN ((qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+						THEN (9233372036854775807 + ((qs.total_logical_writes - tqs.total_logical_writes)))
+						ELSE (qs.total_logical_writes - tqs.total_logical_writes)
+					END  AS Total_LIO_writes,
+					qs.last_logical_writes AS Last_LIO_writes,
+					CASE 
+						WHEN (((qs.total_worker_time - tqs.total_worker_time) / 1000) < 0)  
+						THEN (9233372036854775807 + ((qs.total_worker_time - tqs.total_worker_time) / 1000))
+						ELSE ((qs.total_worker_time - tqs.total_worker_time) / 1000)
+					END  AS Total_CPU_time_ms,
+					qs.last_worker_time / 1000 AS Last_CPU_time_ms,
+					CASE 
+						WHEN (((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000) < 0)  
+						THEN (9233372036854775807 + ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000))
+						ELSE ((qs.total_elapsed_time - tqs.total_elapsed_time) / 1000)
+					END  AS Total_elapsed_time_ms,
+					qs.last_elapsed_time / 1000 AS Last_elapsed_time_ms,
+					qs.last_execution_time AS Last_EXEC,
+					REPLACE (
+					REPLACE (
+					REPLACE (
+					SUBSTRING(
+						qt.TEXT
+					, (qs.statement_start_offset / 2) + 1
+					, ((CASE qs.statement_end_offset WHEN - 1 
+						THEN DATALENGTH(qt.TEXT) 
+						ELSE qs.statement_end_offset END - qs.statement_start_offset) / 2) 
+					+ 1), 
+					CHAR(13) + CHAR(10), '' ''), 
+					CHAR(9), '' ''),
+					CHAR(10), '' '') AS SQL_TEXT
+				FROM ' + @TB_SECOND_QUERY_EXECUTION + ' qs
+				INNER JOIN ' + @TB_FIRST_QUERY_EXECUTION + ' tqs on qs.plan_handle=tqs.plan_handle AND qs.sql_handle=tqs.sql_handle AND qs.statement_end_offset=tqs.statement_end_offset AND qs.statement_start_offset=tqs.statement_start_offset
+				CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+				WHERE (qs.execution_count - tqs.execution_count) > 0 AND (qs.total_logical_reads - tqs.total_logical_reads) > 0 AND (qs.total_worker_time - tqs.total_worker_time) > 0
+				ORDER BY (qs.total_worker_time - tqs.total_worker_time) DESC'
+
+			EXEC (@REPORT_QUERY_CPUTIME)
+
+			------------------------------ Relatório - TOP 20 Procedure Stats - Logical Reads ------------------------------
+		
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT @DT_MONIT
+			PRINT '=============================================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 20 - PROCEDURE STATS - LOGICAL READS '
+			PRINT '=============================================================================='
+			PRINT ''
+
+			SET @REPORT_PROCEDURE_LOGICALREAD='USE tempdb;SELECT TOP 20 
+					convert(varchar(30),db_name(qs.databASe_id)) AS DB_name,
+					convert(varchar(50),OBJECT_NAME(qs.object_id,qs.databASe_id)) AS SP_name,
+					CASE 
+						WHEN (SUM(qs.execution_count - tqs.execution_count) < 0)  
+						THEN (9233372036854775807 + (SUM(qs.execution_count - tqs.execution_count)))
+						ELSE SUM(qs.execution_count - tqs.execution_count)
+					END  AS Exec_cnt,
+					CASE 
+						WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+						THEN (9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads)))
+						ELSE SUM(qs.total_logical_reads - tqs.total_logical_reads)
+					END  AS Total_LIO_reads,
+					CASE 
+						WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads))) / 9 AS BIGINT)
+						ELSE CAST(SUM(qs.total_logical_reads - tqs.total_logical_reads) / 9 AS BIGINT)
+					END  AS Avg_LIO_reads_per_sec,
+					CASE 
+						WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+						THEN (9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes)))
+						ELSE SUM(qs.total_logical_writes - tqs.total_logical_writes)
+					END  AS Total_LIO_writes,
+							CASE 
+						WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes))) / 9 AS BIGINT)
+						ELSE CAST(SUM(qs.total_logical_writes - tqs.total_logical_writes) / 9 AS BIGINT)
+					END  AS Avg_LIO_writes_per_sec,
+					CASE 
+						WHEN ((SUM(qs.total_worker_time - tqs.total_worker_time)) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_worker_time - tqs.total_worker_time))) / 1000 AS BIGINT)
+						ELSE CAST((SUM(qs.total_worker_time - tqs.total_worker_time)) / 1000 AS BIGINT)
+					END  AS Total_CPU_time_ms,
+					CASE 
+						WHEN ((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_elapsed_time - tqs.total_elapsed_time))) / 1000 AS BIGINT)
+						ELSE CAST((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) / 1000 AS BIGINT)
+					END  AS Total_elapsed_time_ms
+				FROM ' + @TB_SECOND_PROCEDURE_EXECUTION + ' qs
+				INNER JOIN ' + @TB_FIRST_PROCEDURE_EXECUTION + ' tqs on qs.object_id=tqs.object_id AND qs.databASe_id=tqs.databASe_id
+				WHERE (qs.execution_count - tqs.execution_count) > 0 
+				AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+				AND OBJECT_NAME(qs.object_id,qs.databASe_id) is NOT NULL 
+				AND db_name(qs.databASe_id) is NOT NULL
+				group by qs.databASe_id, qs.object_id
+				ORDER BY 4 DESC'
+		
+			EXEC (@REPORT_PROCEDURE_LOGICALREAD)
+
+			----------------------------- Relatório - TOP 20 Procedure Stats - Execution Count -----------------------------
+	
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT @DT_MONIT
+			PRINT '=============================================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT 'TOP 20 - PROCEDURE STATS - EXECUTION COUNT ' 
+			PRINT '=============================================================================='
+			PRINT ''
+
+			SET @REPORT_PROCEDURE_EXECUTIONCOUNT='USE tempdb;SELECT TOP 20 
+					convert(varchar(30),db_name(qs.databASe_id)) AS DB_name,
+					convert(varchar(50),OBJECT_NAME(qs.object_id,qs.databASe_id)) AS SP_name,
+					CASE 
+						WHEN (SUM(qs.execution_count - tqs.execution_count) < 0)  
+						THEN (9233372036854775807 + (SUM(qs.execution_count - tqs.execution_count)))
+						ELSE SUM(qs.execution_count - tqs.execution_count)
+					END  AS Exec_cnt,
+					CASE 
+						WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+						THEN (9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads)))
+						ELSE SUM(qs.total_logical_reads - tqs.total_logical_reads)
+					END  AS Total_LIO_reads,
+					CASE 
+						WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads))) / 9 AS BIGINT)
+						ELSE CAST(SUM(qs.total_logical_reads - tqs.total_logical_reads) / 9 AS BIGINT)
+					END  AS Avg_LIO_reads_per_sec,
+					CASE 
+						WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+						THEN (9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes)))
+						ELSE SUM(qs.total_logical_writes - tqs.total_logical_writes)
+					END  AS Total_LIO_writes,
+							CASE 
+						WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes))) / 9 AS BIGINT)
+						ELSE CAST(SUM(qs.total_logical_writes - tqs.total_logical_writes) / 9 AS BIGINT)
+					END  AS Avg_LIO_writes_per_sec,
+					CASE 
+						WHEN ((SUM(qs.total_worker_time - tqs.total_worker_time)) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_worker_time - tqs.total_worker_time))) / 1000 AS BIGINT)
+						ELSE CAST((SUM(qs.total_worker_time - tqs.total_worker_time)) / 1000 AS BIGINT)
+					END  AS Total_CPU_time_ms,
+					CASE 
+						WHEN ((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_elapsed_time - tqs.total_elapsed_time))) / 1000 AS BIGINT)
+						ELSE CAST((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) / 1000 AS BIGINT)
+					END  AS Total_elapsed_time_ms
+				FROM ' + @TB_SECOND_PROCEDURE_EXECUTION + ' qs
+				INNER JOIN ' + @TB_FIRST_PROCEDURE_EXECUTION + ' tqs on qs.object_id=tqs.object_id AND qs.databASe_id=tqs.databASe_id
+				WHERE (qs.execution_count - tqs.execution_count) > 0 
+				AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+				AND OBJECT_NAME(qs.object_id,qs.databASe_id) is NOT NULL 
+				AND db_name(qs.databASe_id) is NOT NULL
+				group by qs.databASe_id, qs.object_id
+				ORDER BY 3 DESC'
+				
+			EXEC (@REPORT_PROCEDURE_EXECUTIONCOUNT)
+
+			-------------------------------- Relatório - TOP 20 Procedure Stats - CPU Time --------------------------------
+			
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT @DT_MONIT
+			PRINT '=============================================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '=============================================================================='
+			PRINT 'TOP 20 - PROCEDURE STATS - CPU TIME '
+			PRINT '=============================================================================='
+			PRINT ''
+
+			SET @REPORT_PROCEDURE_CPUTIME='USE tempdb;SELECT TOP 20 
+					convert(varchar(30),db_name(qs.databASe_id)) AS DB_name,
+					convert(varchar(50),OBJECT_NAME(qs.object_id,qs.databASe_id)) AS SP_name,
+					CASE 
+						WHEN (SUM(qs.execution_count - tqs.execution_count) < 0)  
+						THEN (9233372036854775807 + (SUM(qs.execution_count - tqs.execution_count)))
+						ELSE SUM(qs.execution_count - tqs.execution_count)
+					END  AS Exec_cnt,
+					CASE 
+						WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+						THEN (9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads)))
+						ELSE SUM(qs.total_logical_reads - tqs.total_logical_reads)
+					END  AS Total_LIO_reads,
+					CASE 
+						WHEN (SUM(qs.total_logical_reads - tqs.total_logical_reads) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_logical_reads - tqs.total_logical_reads))) / 9 AS BIGINT)
+						ELSE CAST(SUM(qs.total_logical_reads - tqs.total_logical_reads) / 9 AS BIGINT)
+					END  AS Avg_LIO_reads_per_sec,
+					CASE 
+						WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+						THEN (9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes)))
+						ELSE SUM(qs.total_logical_writes - tqs.total_logical_writes)
+					END  AS Total_LIO_writes,
+							CASE 
+						WHEN (SUM(qs.total_logical_writes - tqs.total_logical_writes) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_logical_writes - tqs.total_logical_writes))) / 9 AS BIGINT)
+						ELSE CAST(SUM(qs.total_logical_writes - tqs.total_logical_writes) / 9 AS BIGINT)
+					END  AS Avg_LIO_writes_per_sec,
+					CASE 
+						WHEN ((SUM(qs.total_worker_time - tqs.total_worker_time)) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_worker_time - tqs.total_worker_time)))/ 1000 AS BIGINT)
+						ELSE CAST((SUM(qs.total_worker_time - tqs.total_worker_time))/ 1000 AS BIGINT)
+					END  AS Total_CPU_time_ms,
+					CASE 
+						WHEN ((SUM(qs.total_elapsed_time - tqs.total_elapsed_time)) < 0)  
+						THEN CAST((9233372036854775807 + (SUM(qs.total_elapsed_time - tqs.total_elapsed_time))) / 1000 AS BIGINT)
+						ELSE CAST((SUM(qs.total_elapsed_time - tqs.total_elapsed_time))/ 1000 AS BIGINT)
+					END  AS Total_elapsed_time_ms
+				FROM ' + @TB_SECOND_PROCEDURE_EXECUTION + ' qs
+				INNER JOIN ' + @TB_FIRST_PROCEDURE_EXECUTION + ' tqs on qs.object_id=tqs.object_id AND qs.databASe_id=tqs.databASe_id
+				WHERE (qs.execution_count - tqs.execution_count) > 0 
+				AND (qs.total_logical_reads - tqs.total_logical_reads) > 0
+				AND OBJECT_NAME(qs.object_id,qs.databASe_id) is NOT NULL 
+				AND db_name(qs.databASe_id) is NOT NULL
+				group by qs.databASe_id, qs.object_id
+				ORDER BY 8 DESC'
+			
+			EXEC (@REPORT_PROCEDURE_CPUTIME)
+			
+			SET @DROP_TB_QUERY_01='USE tempdb;DROP TABLE ' + @TB_FIRST_QUERY_EXECUTION
+			SET @DROP_TB_PROCEDURE_01='USE tempdb;DROP TABLE ' + @TB_FIRST_PROCEDURE_EXECUTION
+			SET @DROP_TB_QUERY_02='USE tempdb;DROP TABLE ' + @TB_SECOND_QUERY_EXECUTION
+			SET @DROP_TB_PROCEDURE_02='USE tempdb;DROP TABLE ' + @TB_SECOND_PROCEDURE_EXECUTION
+			
+			--------------------------------------------- Executando relatórios ---------------------------------------------
+
+			EXEC (@DROP_TB_QUERY_01)
+			EXEC (@DROP_TB_PROCEDURE_01)
+			EXEC (@DROP_TB_QUERY_02)
+			EXEC (@DROP_TB_PROCEDURE_02)
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+END
+
