@@ -1,0 +1,225 @@
+IF EXISTS(SELECT 1 FROM sys.procedures WHERE TYPE = 'P' AND name = 'sp__topobjs')
+BEGIN
+	DROP PROCEDURE sp__topobjs
+END
+ 	
+
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp__topobjs] @DELAYMINUTES SMALLINT=1, @TYPEEXECUTION INT=1, @TB_FIRST_EXECUTION VARCHAR(MAX) = NULL, @TB_SECOND_EXECUTION VARCHAR(MAX) = NULL
+WITH ENCRYPTION AS 
+BEGIN
+	---------------------------------------------- Setando parametros Default ----------------------------------------------
+	
+	SET NOCOUNT ON;
+	IF @DELAYMINUTES NOT BETWEEN 1 AND 60
+	SET @DELAYMINUTES = 1	
+	DECLARE @DT_MONIT DATETIME;
+	SET @DT_MONIT = GETDATE()
+	
+	IF @TYPEEXECUTION = 1	
+		BEGIN
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+				
+			SELECT database_id, object_id, index_id, user_seeks, user_scans, user_lookups, user_updates 
+			into #temp_dm_db_index_usage_stats FROM sys.dm_db_index_usage_stats;
+			
+			CREATE NONCLUSTERED INDEX [#temp_dm_db_index_usage_stats_hrs]
+			ON [dbo].[#temp_dm_db_index_usage_stats] ([object_id],[index_id],[database_id])
+			INCLUDE ([user_seeks],[user_scans],[user_lookups],[user_updates])
+
+			---------------------------------------- Tempo de espera entre execuções ----------------------------------------
+			
+			DECLARE @WAIT VARCHAR(100)
+			SELECT @WAIT='WAITFOR delay ''00:'+right('0'+CONVERT(VARCHAR(2),@DELAYMINUTES),2)+':00'''
+			EXEC (@WAIT)
+
+			----------------------------------------- Coletando Waits da 2º chamada -----------------------------------------
+			
+			SELECT database_id, object_id, index_id, user_seeks, user_scans, user_lookups, user_updates 
+			into #temp2_dm_db_index_usage_stats FROM sys.dm_db_index_usage_stats
+
+			CREATE NONCLUSTERED INDEX [#temp2_dm_db_index_usage_stats_hrs]
+			ON [dbo].[#temp2_dm_db_index_usage_stats] ([object_id],[index_id],[database_id])
+			INCLUDE ([user_seeks],[user_scans],[user_lookups],[user_updates])
+
+			-------------------------------------- Relatório - TOP 50 Objects Accessed --------------------------------------
+
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 50 - Top Objects Accessed '  + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+			PRINT '=============================================================================='
+			PRINT ''
+
+			BEGIN
+			SELECT top 50
+				CONVERT(char(30),db_name(ius.database_id)) AS DatabaseName,
+				CONVERT(char(30),ius.object_id) AS Object_Table_id,
+				CASE 
+					WHEN ius.index_id = 0 THEN CONVERT(char(30),'FULL SCAN (ind_id = 0)') 
+					ELSE CONVERT(char(30),ius.index_id) 
+				END AS Object_Index_id,
+				CASE 
+					WHEN ((SUM(ius.user_seeks + ius.user_scans + ius.user_lookups)) - (SUM(tius.user_seeks + tius.user_scans + tius.user_lookups)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_seeks + ius.user_scans + ius.user_lookups)) - (SUM(tius.user_seeks + tius.user_scans + tius.user_lookups))))
+					ELSE ((SUM(ius.user_seeks + ius.user_scans + ius.user_lookups)) - (SUM(tius.user_seeks + tius.user_scans + tius.user_lookups)))
+				END  AS Total_ReadsAccessed,
+				CASE 
+					WHEN ((SUM(ius.user_updates)) - (SUM(tius.user_updates)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_updates)) - (SUM(tius.user_updates))))
+					ELSE ((SUM(ius.user_updates)) - (SUM(tius.user_updates)))
+				END  AS Total_WritesAccessed, 
+				CASE 
+					WHEN ((SUM(ius.user_scans)) - (SUM(tius.user_scans)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_scans)) - (SUM(tius.user_scans))))
+					ELSE ((SUM(ius.user_scans)) - (SUM(tius.user_scans)))
+				END  AS User_scans,
+				CASE 
+					WHEN ((SUM(ius.user_seeks)) - (SUM(tius.user_seeks)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_seeks)) - (SUM(tius.user_seeks))))
+					ELSE ((SUM(ius.user_seeks)) - (SUM(tius.user_seeks)))
+				END  AS User_seeks,
+				CASE 
+					WHEN ((SUM(ius.user_lookups)) - (SUM(tius.user_lookups)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_lookups)) - (SUM(tius.user_lookups))))
+					ELSE ((SUM(ius.user_lookups)) - (SUM(tius.user_lookups)))
+				END  AS User_lookups
+			FROM sys.#temp2_dm_db_index_usage_stats ius
+			INNER JOIN #temp_dm_db_index_usage_stats tius on ius.object_id=tius.object_id AND ius.database_id=tius.database_id AND ius.index_id=tius.index_id
+			WHERE OBJECTPROPERTY(ius.object_id,'IsUserTable') = 1
+			GROUP BY ius.database_id, ius.object_id, ius.index_id
+			HAVING SUM(ius.user_seeks + ius.user_scans + ius.user_lookups) > 0
+			ORDER BY 4 DESC
+			END
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+	ELSE IF @TYPEEXECUTION = 2 -- Type Execution 02 --  Execução da 1º chamada para coleta de dados correntes
+		BEGIN
+			DECLARE @COLLECTION_FIRST_EXECUTION VARCHAR(MAX);
+			DECLARE @INDEX_FIRST_EXECUTION VARCHAR(MAX);
+			DECLARE @DROP_TB_01_OLD VARCHAR(MAX);
+			
+			--------------------------------------- Dropando tabela temp caso exista ---------------------------------------
+			
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_FIRST_EXECUTION)
+				SELECT @DROP_TB_01_OLD='DROP TABLE tempdb..'+@TB_FIRST_EXECUTION+';'
+
+			EXEC (@DROP_TB_01_OLD)
+
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+
+			SET @COLLECTION_FIRST_EXECUTION='USE tempdb;SELECT database_id, object_id, index_id, user_seeks, user_scans, user_lookups, user_updates 
+			INTO ' + @TB_FIRST_EXECUTION +' FROM sys.dm_db_index_usage_stats'
+			SET @INDEX_FIRST_EXECUTION='USE tempdb;CREATE NONCLUSTERED INDEX [temp_dm_db_index_usage_stats_hrs]
+			ON ' + @TB_FIRST_EXECUTION + ' ([object_id],[index_id],[database_id])
+			INCLUDE ([user_seeks],[user_scans],[user_lookups],[user_updates])'
+
+			EXEC (@COLLECTION_FIRST_EXECUTION)
+			EXEC (@INDEX_FIRST_EXECUTION)
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+	ELSE IF @TYPEEXECUTION = 3 -- Type Execution 03 -- Execução da 2º chamada para comparação com a 1º
+		BEGIN
+			DECLARE @COLLECTION_SECOND_EXECUTION VARCHAR(MAX);
+			DECLARE @INDEX_SECOND_EXECUTION VARCHAR(MAX);
+			DECLARE @REPORT_DELTA VARCHAR(MAX);
+			DECLARE @DROP_TB_01 VARCHAR(MAX);
+			DECLARE @DROP_TB_02 VARCHAR(MAX);
+			DECLARE @DROP_TB_02_OLD VARCHAR(MAX);
+
+			--------------------------------------- Dropando tabela temp caso exista ---------------------------------------
+			
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_SECOND_EXECUTION)
+				SELECT @DROP_TB_02_OLD='DROP TABLE tempdb..'+@TB_SECOND_EXECUTION+';'
+
+			EXEC (@DROP_TB_02_OLD)
+			
+			----------------------------------------- Coletando Waits da 2º chamada -----------------------------------------
+		
+			SET @COLLECTION_SECOND_EXECUTION='USE tempdb;SELECT database_id, object_id, index_id, user_seeks, user_scans, user_lookups, user_updates 
+			INTO ' + @TB_SECOND_EXECUTION + ' FROM sys.dm_db_index_usage_stats'
+
+			SET @INDEX_SECOND_EXECUTION='USE tempdb;CREATE NONCLUSTERED INDEX [temp2_dm_db_index_usage_stats_hrs]
+			ON ' + @TB_SECOND_EXECUTION + ' ([object_id],[index_id],[database_id])
+			INCLUDE ([user_seeks],[user_scans],[user_lookups],[user_updates])'
+			
+			EXEC (@COLLECTION_SECOND_EXECUTION)
+			EXEC (@INDEX_SECOND_EXECUTION)
+
+			-------------------------------------- Relatório - TOP 50 Objects Accessed --------------------------------------
+
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 50 - Top Objects Accessed '
+			PRINT '=============================================================================='
+			PRINT ''
+
+			SET @REPORT_DELTA='USE tempdb;SELECT top 50
+				CONVERT(char(30),db_name(ius.database_id)) AS DatabaseName,
+				CONVERT(char(30),ius.object_id) AS Object_Table_id,
+				CASE 
+					WHEN ius.index_id = 0 THEN CONVERT(char(30),''FULL SCAN (ind_id = 0)'') 
+					ELSE CONVERT(char(30),ius.index_id) 
+				END AS Object_Index_id,
+				CASE 
+					WHEN ((SUM(ius.user_seeks + ius.user_scans + ius.user_lookups)) - (SUM(tius.user_seeks + tius.user_scans + tius.user_lookups)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_seeks + ius.user_scans + ius.user_lookups)) - (SUM(tius.user_seeks + tius.user_scans + tius.user_lookups))))
+					ELSE ((SUM(ius.user_seeks + ius.user_scans + ius.user_lookups)) - (SUM(tius.user_seeks + tius.user_scans + tius.user_lookups)))
+				END  AS Total_ReadsAccessed,
+				CASE 
+					WHEN ((SUM(ius.user_updates)) - (SUM(tius.user_updates)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_updates)) - (SUM(tius.user_updates))))
+					ELSE ((SUM(ius.user_updates)) - (SUM(tius.user_updates)))
+				END  AS Total_WritesAccessed, 
+				CASE 
+					WHEN ((SUM(ius.user_scans)) - (SUM(tius.user_scans)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_scans)) - (SUM(tius.user_scans))))
+					ELSE ((SUM(ius.user_scans)) - (SUM(tius.user_scans)))
+				END  AS User_scans,
+				CASE 
+					WHEN ((SUM(ius.user_seeks)) - (SUM(tius.user_seeks)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_seeks)) - (SUM(tius.user_seeks))))
+					ELSE ((SUM(ius.user_seeks)) - (SUM(tius.user_seeks)))
+				END  AS User_seeks,
+				CASE 
+					WHEN ((SUM(ius.user_lookups)) - (SUM(tius.user_lookups)) < 0)  
+					THEN (9233372036854775807 + ((SUM(ius.user_lookups)) - (SUM(tius.user_lookups))))
+					ELSE ((SUM(ius.user_lookups)) - (SUM(tius.user_lookups)))
+				END  AS User_lookups
+			FROM ' + @TB_SECOND_EXECUTION + ' ius
+			INNER JOIN ' + @TB_FIRST_EXECUTION + ' tius on ius.object_id=tius.object_id AND ius.database_id=tius.database_id AND ius.index_id=tius.index_id
+			WHERE OBJECTPROPERTY(ius.object_id,''IsUserTable'') = 1
+			GROUP BY ius.database_id, ius.object_id, ius.index_id
+			HAVING SUM(ius.user_seeks + ius.user_scans + ius.user_lookups) > 0
+			ORDER BY 4 DESC'
+			
+			SET @DROP_TB_01='USE tempdb;DROP TABLE ' + @TB_FIRST_EXECUTION
+			SET @DROP_TB_02='USE tempdb;DROP TABLE ' + @TB_SECOND_EXECUTION
+
+			--------------------------------------------- Executando relatórios ---------------------------------------------
+
+			EXEC (@REPORT_DELTA)
+			EXEC (@DROP_TB_01)
+			EXEC (@DROP_TB_02)
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+END
