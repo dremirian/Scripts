@@ -1,0 +1,123 @@
+IF EXISTS (select 1 from sys.procedures where type = 'P' and name = 'sp__acc')
+	BEGIN
+		drop procedure sp__acc
+	END
+ 	
+
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp__acc] (@spid int = NULL) 
+WITH ENCRYPTION AS
+
+DECLARE @topSpid 		int,
+		@topSqlHandle	varbinary(64),
+		@topPlanHandle	varbinary(64),
+		@DT_MONIT 		DATETIME
+		
+SET NOCOUNT ON		
+SET @DT_MONIT = getdate()	
+		
+SELECT	s.session_id, 
+		s.status, 		
+		r.blocking_session_id,
+		case when s.login_name='' then CONVERT(char(30),s.original_login_name) else CONVERT(char(30), s.login_name) end AS login_name,
+		r.logical_reads, 
+		r.cpu_time, 
+		db_name(r.database_id) as db_name, 
+		r.command,
+		s.program_name,
+		s.host_name,
+		s.login_time,
+		r.sql_handle,
+		r.plan_handle
+	INTO #tb_tmp_acc
+	FROM sys.dm_exec_requests r
+	INNER JOIN 	sys.dm_exec_sessions s
+			ON 	s.session_id = r.session_id
+WHERE 		r.logical_reads > 100
+		and	s.session_id 	<> @@spid
+		and s.session_id 	= isnull(@spid, s.session_id)
+		and lower(r.status) not in('sleeping','background') 
+		and upper(r.command) not in ('AWAITING COMMAND','LAZY WRITER','CHECKPOINT SLEEP','WAITFOR')
+		
+
+SELECT 	TOP 1 
+		@topSpid 		= session_id,
+		@topSqlHandle	= sql_handle,
+		@topPlanHandle  = plan_handle
+FROM #tb_tmp_acc
+ORDER BY logical_reads desc
+
+
+IF @topSpid IS NOT NULL
+BEGIN
+
+print ''
+print '========================================================='
+print @DT_MONIT
+print '========================================================='
+print ''
+print ''
+print '========================================================='
+print 'Active Sessions Consumer'
+print '========================================================='
+print ''
+
+
+	SELECT	spid 		= session_id, 
+			status 		= convert(char(20), status), 		
+			blk			= blocking_session_id,
+			login_name	= convert(char(30), login_name), 
+			lreads		= logical_reads, 
+			cpu			= cpu_time, 
+			dbname		= convert(char(35), db_name), 
+			cmd			= command,
+			program		= convert(char(30), program_name),
+			hostname 	= convert(char(30), host_name),
+			login_time	= login_time 		
+	FROM #tb_tmp_acc
+	ORDER BY logical_reads DESC
+
+print ''
+print '========================================================='
+print 'SQLTEXT - TOP Consumer'
+print '========================================================='
+print ''
+
+SELECT 	spid	= @topSpid,
+			SQLtext	= replace(text, char(13)+char(10), ' ')
+			FROM sys.dm_exec_sql_text(@topSqlHandle)
+			
+print ''
+print ''
+
+SELECT  SUBSTRING(st.text, (qs.statement_start_offset/2)+1, ((CASE qs.statement_end_offset WHEN -1 THEN DATALENGTH(st.text)
+			ELSE qs.statement_end_offset
+			END - qs.statement_start_offset)/2) + 1) AS statement_text
+			FROM sys.[dm_exec_requests] AS qs
+			CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+			WHERE  qs.session_id= @topSpid
+
+IF APP_NAME() != 'SQLCMD'
+BEGIN
+	print ''
+	print '========================================================='
+	print 'PLANTEXT - TOP Consumer'
+	print '========================================================='
+	print ''
+	
+		SELECT 	spid 		= @topSpid,
+				PlanText	= query_plan
+				FROM sys.dm_exec_query_plan(@topPlanHandle)
+	
+	
+END
+END
+
+DROP TABLE #tb_tmp_acc
+
+RETURN
