@@ -1,0 +1,194 @@
+IF EXISTS(SELECT 1 FROM sys.procedures WHERE TYPE = 'P' AND Name = 'sp__monspinlock')
+BEGIN
+    DROP PROCEDURE dbo.sp__monspinlock
+END
+
+
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp__monspinlock] @DELAYMINUTES SMALLINT=1, @TYPEEXECUTION INT=1, @TB_FIRST_EXECUTION VARCHAR(MAX) = NULL
+WITH ENCRYPTION AS 
+BEGIN
+	---------------------------------------------- Setando parametros Default ----------------------------------------------
+	
+	SET NOCOUNT ON;
+	IF @DELAYMINUTES NOT BETWEEN 1 AND 60
+	SET @DELAYMINUTES = 1
+	DECLARE @DeltaSpinlock NVARCHAR(2000)
+	DECLARE @DT_MONIT DATETIME
+	SET @DT_MONIT = GETDATE()
+	DECLARE @ProductVersion char(40)
+	SET @ProductVersion = convert(nvarchar(128), Left(@@Version, Charindex('-', @@version) - 2))
+	IF @ProductVersion not like '%2005%'
+
+	IF @TYPEEXECUTION = 1	
+		BEGIN
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+			
+			DECLARE @CurrentStatusSQL NVARCHAR(300)
+			
+			CREATE TABLE #spin_waits (name  NVARCHAR(512),
+			collisions bigint,
+			spins bigint,
+			sleep_time bigint,
+			backoffs int)
+
+			SET @CurrentStatusSQL =  'insert into #spin_waits SELECT 	name 
+					,collisions 
+					,spins 
+					,sleep_time 
+					,backoffs
+			from sys.dm_os_spinlock_stats'
+
+			EXECUTE(@CurrentStatusSQL)
+					
+			---------------------------------------- Tempo de espera entre execuções ----------------------------------------
+			
+			DECLARE @WAIT VARCHAR(100)
+			SELECT @WAIT='WAITFOR delay ''00:'+right('0'+CONVERT(VARCHAR(2),@DELAYMINUTES),2)+':00'''
+			EXEC (@WAIT)
+
+			------------------------------------------ Relatório - TOP 20 SpinLock  ------------------------------------------
+
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 20 - Spinlock ' + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+			PRINT '=============================================================================='
+			PRINT ''
+
+			SET @DeltaSpinlock =  'SELECT top 20
+					convert(char(30),spins_current.name) as Spinlock_Name
+					, CASE 
+						WHEN ((spins_current.spins - spins_previous.spins) < 0)
+						THEN (9223372036854775807 + (spins_current.spins - spins_previous.spins))
+						ELSE (spins_current.spins - spins_previous.spins)
+					 END as Spins
+					 
+					, CASE 
+						WHEN ((spins_current.collisions - spins_previous.collisions) < 0)
+						THEN (9223372036854775807 + (spins_current.collisions - spins_previous.collisions))
+						ELSE (spins_current.collisions - spins_previous.collisions)
+					 END as Collisions
+					 
+					, CASE  WHEN (spins_current.spins - spins_previous.spins) = 0 THEN 0
+							WHEN (((spins_current.spins - spins_previous.spins) / (spins_current.collisions - spins_previous.collisions)) < 0) 
+							THEN ((9223372036854775807 + (spins_current.spins - spins_previous.spins)) / (9223372036854775807 + (spins_current.collisions - spins_previous.collisions)))
+							ELSE ((spins_current.spins - spins_previous.spins) /
+							(spins_current.collisions - spins_previous.collisions)) 
+						END AS SpinsPerCollision
+							
+					, CASE WHEN ((spins_current.backoffs - spins_previous.backoffs) < 0)
+							THEN (9223372036854775807 + (spins_current.backoffs - spins_previous.backoffs))	
+							ELSE (spins_current.backoffs - spins_previous.backoffs)
+						END as Backoffs
+						
+					, CASE WHEN ((spins_current.sleep_time - spins_previous.sleep_time) < 0) 
+						   THEN (9223372036854775807 + (spins_current.sleep_time - spins_previous.sleep_time))
+						   ELSE (spins_current.sleep_time - spins_previous.sleep_time)
+						END as Sleep_time
+						
+				from sys.dm_os_spinlock_stats spins_current
+				inner join #spin_waits as spins_previous on spins_previous.name = spins_current.name
+				where  spins_current.name is NOT NULL and spins_current.collisions > 0 
+				order by Collisions DESC, SpinsPerCollision DESC, Backoffs DESC'
+
+			EXECUTE (@DeltaSpinlock)	
+			DROP TABLE #spin_waits 
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+	ELSE IF @TYPEEXECUTION = 2 -- Type Execution 02 --  Execução da 1º chamada para coleta de dados correntes
+		BEGIN
+			DECLARE @COLLECTION_FIRST_EXECUTION VARCHAR(MAX)
+			DECLARE @DROP_TB_01_OLD VARCHAR(MAX);
+
+			--------------------------------------- Dropando tabela temp caso exista ---------------------------------------
+			
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_FIRST_EXECUTION)
+				SELECT @DROP_TB_01_OLD='DROP TABLE tempdb..'+@TB_FIRST_EXECUTION+';'
+
+			EXEC (@DROP_TB_01_OLD)
+			
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+
+			SET @COLLECTION_FIRST_EXECUTION =  'USE tempdb; SELECT name, collisions, spins, sleep_time, backoffs
+			INTO ' + @TB_FIRST_EXECUTION + ' from sys.dm_os_spinlock_stats'
+
+			EXEC (@COLLECTION_FIRST_EXECUTION)
+		
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+	ELSE IF @TYPEEXECUTION = 3 -- Type Execution 03 -- Execução da 2º chamada para comparação com a 1º
+		BEGIN
+			DECLARE @REPORT_DELTA VARCHAR(MAX)
+			DECLARE @DROP_TB_01 VARCHAR(MAX);
+			
+			------------------------------------------ Relatório - TOP 20 SpinLock  ------------------------------------------
+
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'TOP 20 - Spinlock ' 
+			PRINT '=============================================================================='
+			PRINT ''
+			
+			SET @REPORT_DELTA='USE tempdb;SELECT top 20
+			convert(char(30),spins_current.name) as Spinlock_Name
+			, CASE 
+				WHEN ((spins_current.spins - spins_previous.spins) < 0)
+				THEN (9223372036854775807 + (spins_current.spins - spins_previous.spins))
+				ELSE (spins_current.spins - spins_previous.spins)
+			 END as Spins
+			 
+			, CASE 
+				WHEN ((spins_current.collisions - spins_previous.collisions) < 0)
+				THEN (9223372036854775807 + (spins_current.collisions - spins_previous.collisions))
+				ELSE (spins_current.collisions - spins_previous.collisions)
+			 END as Collisions
+			 
+			, CASE  WHEN (spins_current.spins - spins_previous.spins) = 0 THEN 0
+					WHEN (((spins_current.spins - spins_previous.spins) / (spins_current.collisions - spins_previous.collisions)) < 0) 
+					THEN ((9223372036854775807 + (spins_current.spins - spins_previous.spins)) / (9223372036854775807 + (spins_current.collisions - spins_previous.collisions)))
+					ELSE ((spins_current.spins - spins_previous.spins) /
+					(spins_current.collisions - spins_previous.collisions)) 
+				END AS SpinsPerCollision
+					
+			, CASE WHEN ((spins_current.backoffs - spins_previous.backoffs) < 0)
+					THEN (9223372036854775807 + (spins_current.backoffs - spins_previous.backoffs))	
+					ELSE (spins_current.backoffs - spins_previous.backoffs)
+				END as Backoffs
+				
+			, CASE WHEN ((spins_current.sleep_time - spins_previous.sleep_time) < 0) 
+				   THEN (9223372036854775807 + (spins_current.sleep_time - spins_previous.sleep_time))
+				   ELSE (spins_current.sleep_time - spins_previous.sleep_time)
+				END as Sleep_time
+				
+			from sys.dm_os_spinlock_stats spins_current
+			inner join ' + @TB_FIRST_EXECUTION + ' as spins_previous on spins_previous.name = spins_current.name
+			where  spins_current.name is NOT NULL and spins_current.collisions > 0 
+			order by Collisions DESC, SpinsPerCollision DESC, Backoffs DESC'
+
+			SET @DROP_TB_01='USE tempdb;DROP TABLE ' + @TB_FIRST_EXECUTION
+
+			--------------------------------------------- Executando relatórios ---------------------------------------------
+
+			EXEC (@REPORT_DELTA)
+			EXEC (@DROP_TB_01)
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+END
