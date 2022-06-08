@@ -1,0 +1,115 @@
+IF EXISTS (select 1 from sys.procedures where type = 'P' and name = 'sp__tempdbusage')
+	BEGIN
+		drop procedure sp__tempdbusage
+	END
+ 	
+
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[sp__tempdbusage]  
+--WITH ENCRYPTION 
+AS
+
+
+DECLARE @tmpsize int,
+		@DT_MONIT 		DATETIME
+
+
+SET NOCOUNT ON	
+SET @DT_MONIT = getdate()	
+
+select @tmpsize = (sum(size) * 8 / 1024) from tempdb.sys.database_files where type = 0
+
+SELECT	spid 			= s.session_id,
+		status 			= case when r.status is null then s.status when r.status is not null and r.blocking_session_id <> 0 then 'lockwait' else r.status end, 
+		login_name		= case when s.login_name='' then CONVERT(char(40),s.original_login_name) else CONVERT(char(40), s.login_name) end,
+		t.user_objects_alloc_page_count * 8 / 1024 AS [User Alloc (MB)],
+		--t.user_objects_dealloc_page_count * 8 AS user_obj_dealloc (KB),
+		t.internal_objects_alloc_page_count * 8 / 1024 AS [Internal Alloc (MB)],
+		--t.internal_objects_dealloc_page_count * 8 AS internal_obj_dealloc,
+		[session_type] = CASE s.is_user_process WHEN 1 THEN 'user session' WHEN 0 THEN 'system session' END,
+		r.start_time,
+		r.sql_handle,
+		r.plan_handle
+	INTO #HRS_TMPMONIT
+	FROM sys.dm_db_session_space_usage t   
+	INNER  JOIN sys.dm_exec_sessions s  on t.session_id = s.session_id
+	INNER JOIN sys.dm_exec_requests r  ON r.session_id = s.session_id
+	WHERE 	
+			r.session_id <> @@spid
+			and lower(r.status) not in('background')
+			and  (t.user_objects_alloc_page_count + t.internal_objects_alloc_page_count) * 8 / 1024 >= @tmpsize * 0.1
+
+
+print ''
+print '========================================================='
+print @DT_MONIT
+print '========================================================='
+print ''
+print ''
+print '========================================================='
+print 'Top Tempdb Sessions Consumers'
+print '========================================================='
+print ''
+
+select TOP 5
+		spid,
+		status,
+		login_name,
+		[User Alloc (MB)],
+		[Internal Alloc (MB)],
+		[session_type],
+		start_time
+ from #HRS_TMPMONIT
+ ORDER BY [User Alloc (MB)], [Internal Alloc (MB)] DESC;
+
+ 
+ 
+print ''
+print '========================================================='
+print 'SQLTEXT - TOP Consumers'
+print '========================================================='
+print ''
+
+
+SELECT 	TOP 5	spid,
+			SQLtext	= replace(text, char(13)+char(10), ' ')
+			FROM #HRS_TMPMONIT h
+			CROSS APPLY sys.dm_exec_sql_text(h.sql_handle)
+			ORDER BY [User Alloc (MB)], [Internal Alloc (MB)] DESC;
+print ''
+print ''
+
+SELECT TOP 5
+			h.spid, SUBSTRING(st.text, (qs.statement_start_offset/2)+1, ((CASE qs.statement_end_offset WHEN -1 THEN DATALENGTH(st.text)
+			ELSE qs.statement_end_offset
+			END - qs.statement_start_offset)/2) + 1) AS statement_text
+FROM sys.[dm_exec_requests] AS qs
+JOIN #HRS_TMPMONIT h
+on qs.session_id = h.spid
+CROSS APPLY sys.dm_exec_sql_text(h.sql_handle) AS st
+ORDER BY [User Alloc (MB)], [Internal Alloc (MB)] DESC;
+
+IF APP_NAME() != 'SQLCMD'
+BEGIN
+	print ''
+	print '========================================================='
+	print 'PLANTEXT - TOP Consumer'
+	print '========================================================='
+	print ''
+	
+		SELECT 	TOP 5
+				spid,
+				PlanText = query_plan
+				FROM #HRS_TMPMONIT h
+				CROSS APPLY sys.dm_exec_query_plan(h.plan_handle)
+				ORDER BY [User Alloc (MB)], [Internal Alloc (MB)] DESC;
+	
+DROP TABLE #HRS_TMPMONIT	
+end
+RETURN
