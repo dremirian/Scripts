@@ -1,0 +1,366 @@
+IF EXISTS(SELECT 1 FROM sys.procedures WHERE TYPE = 'P' AND name = 'sp__actdevio')
+BEGIN
+	DROP PROCEDURE sp__actdevio
+END
+ 	
+
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp__actdevio] @DELAYMINUTES SMALLINT=1, @TYPEEXECUTION INT=1, @TB_FIRST_EXECUTION VARCHAR(MAX) = NULL
+WITH ENCRYPTION AS 
+BEGIN
+	---------------------------------------------- Setando parametros Default ----------------------------------------------
+	
+	SET NOCOUNT ON;
+	IF @DELAYMINUTES NOT BETWEEN 1 AND 60
+	SET @DELAYMINUTES = 1	
+	DECLARE @DT_MONIT DATETIME
+	SET @DT_MONIT = GETDATE()
+
+	IF @TYPEEXECUTION = 1
+		BEGIN
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+			
+			SELECT 
+			mf.database_id as database_id,
+			DB_NAME(mf.database_id) AS databaseName,
+			mf.FILE_ID as FILE_ID, 
+			CASE
+			WHEN TYPE_desc = 'LOG' THEN 'Log File'
+			WHEN TYPE_desc = 'ROWS' THEN 'Data File'
+			ELSE TYPE_desc
+			END AS File_TYPE_desc
+			,mf.physical_name
+			,num_of_reads
+			,num_of_bytes_read
+			,io_stall_read_ms
+			,num_of_writes
+			,num_of_bytes_written
+			,io_stall_write_ms
+			,io_stall
+			into #temp_dm_io_virtual_file_stats
+			FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS divfs
+			JOIN sys.master_files AS mf ON mf.database_id = divfs.database_id
+			AND mf.FILE_ID = divfs.FILE_ID
+			ORDER BY num_of_Reads DESC
+
+			---------------------------------------- Tempo de espera entre execuções ----------------------------------------
+			
+			DECLARE @WAIT VARCHAR(100)
+			SELECT @WAIT='WAITFOR delay ''00:'+right('0'+CONVERT(VARCHAR(2),@DELAYMINUTES),2)+':00'''
+			EXEC (@WAIT)	
+
+			--------------------------------------- Relatório Activity - I/O DataBases ---------------------------------------
+			
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'ACTIVITY - I/O DATABASES'  + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+			PRINT '=============================================================================='
+			PRINT ''
+
+			SELECT
+			CONVERT(char(30),DB_NAME(mf.database_id)) AS databaseName,
+			CASE
+				WHEN mf.TYPE_desc = 'LOG' THEN CONVERT(char(10),'Log File')
+				WHEN mf.TYPE_desc = 'ROWS' THEN CONVERT(char(10),'Data File')
+				ELSE CONVERT(char(10),mf.TYPE_desc)
+			END AS File_TYPE_desc,
+			CASE 
+				WHEN (sum(divfs.num_of_reads) - sum(tdivfs.num_of_reads) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.num_of_reads) - sum(tdivfs.num_of_reads)))
+				ELSE (sum(divfs.num_of_reads) - sum(tdivfs.num_of_reads))
+			END  AS num_of_reads,
+			CASE 
+				WHEN (sum(divfs.num_of_bytes_read) - sum(tdivfs.num_of_bytes_read) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.num_of_bytes_read) - sum(tdivfs.num_of_bytes_read)))
+				ELSE (sum(divfs.num_of_bytes_read) - sum(tdivfs.num_of_bytes_read))
+			END  AS num_of_bytes_read,
+			CASE 
+				WHEN (sum(divfs.io_stall_read_ms) - sum(tdivfs.io_stall_read_ms) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.io_stall_read_ms) - sum(tdivfs.io_stall_read_ms)))
+				ELSE (sum(divfs.io_stall_read_ms) - sum(tdivfs.io_stall_read_ms))
+			END  AS io_stall_read_ms,
+			CASE 
+				WHEN (sum(divfs.num_of_writes) - sum(tdivfs.num_of_writes) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.num_of_writes) - sum(tdivfs.num_of_writes)))
+				ELSE (sum(divfs.num_of_writes) - sum(tdivfs.num_of_writes))
+			END  AS num_of_writes,
+			CASE 
+				WHEN (sum(divfs.num_of_bytes_written) - sum(tdivfs.num_of_bytes_written) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.num_of_bytes_written) - sum(tdivfs.num_of_bytes_written)))
+				ELSE (sum(divfs.num_of_bytes_written) - sum(tdivfs.num_of_bytes_written))
+			END  AS num_of_bytes_written,
+			CASE 
+				WHEN (sum(divfs.io_stall_write_ms) - sum(tdivfs.io_stall_write_ms) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.io_stall_write_ms) - sum(tdivfs.io_stall_write_ms)))
+				ELSE (sum(divfs.io_stall_write_ms) - sum(tdivfs.io_stall_write_ms))
+			END  AS io_stall_write_ms,
+			CASE 
+				WHEN (sum(divfs.io_stall) - sum(tdivfs.io_stall) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.io_stall) - sum(tdivfs.io_stall)))
+				ELSE (sum(divfs.io_stall) - sum(tdivfs.io_stall))
+			END  AS io_stall
+			FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS divfs
+			INNER JOIN #temp_dm_io_virtual_file_stats tdivfs on divfs.database_id=tdivfs.database_id AND divfs.FILE_ID=tdivfs.FILE_ID
+			JOIN sys.master_files AS mf ON mf.database_id = divfs.database_id
+			AND mf.FILE_ID = divfs.FILE_ID
+			GROUP BY mf.database_id, mf.TYPE_desc
+			ORDER BY num_of_reads DESC
+
+			--------------------------------------- Relatório Activity - I/O Devices ---------------------------------------
+
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'ACTIVITY - I/O DEVICES '  + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+			PRINT '=============================================================================='
+			PRINT ''
+
+			SELECT
+			CONVERT(char(30),DB_NAME(mf.database_id)) AS databaseName,
+			CASE
+				WHEN mf.TYPE_desc = 'LOG' THEN CONVERT(char(10),'Log File')
+				WHEN mf.TYPE_desc = 'ROWS' THEN CONVERT(char(10),'Data File')
+				ELSE CONVERT(char(10),mf.TYPE_desc)
+			END AS File_TYPE_desc,
+			CONVERT(char(128),mf.physical_name) as physical_name,
+			CASE 
+				WHEN ((divfs.num_of_reads - tdivfs.num_of_reads) < 0)  
+				THEN (9233372036854775807 + (divfs.num_of_reads - tdivfs.num_of_reads))
+				ELSE (divfs.num_of_reads - tdivfs.num_of_reads)
+			END  AS num_of_reads,
+			CASE 
+				WHEN ((divfs.num_of_bytes_read - tdivfs.num_of_bytes_read) < 0)  
+				THEN (9233372036854775807 + (divfs.num_of_bytes_read - tdivfs.num_of_bytes_read))
+				ELSE (divfs.num_of_bytes_read - tdivfs.num_of_bytes_read)
+			END  AS num_of_bytes_read,
+			CASE 
+				WHEN ((divfs.io_stall_read_ms - tdivfs.io_stall_read_ms) < 0)  
+				THEN (9233372036854775807 + (divfs.io_stall_read_ms - tdivfs.io_stall_read_ms))
+				ELSE (divfs.io_stall_read_ms - tdivfs.io_stall_read_ms)
+			END  AS io_stall_read_ms,
+			CASE 
+				WHEN ((divfs.num_of_writes - tdivfs.num_of_writes) < 0)  
+				THEN (9233372036854775807 + (divfs.num_of_writes - tdivfs.num_of_writes))
+				ELSE (divfs.num_of_writes - tdivfs.num_of_writes)
+			END  AS num_of_writes,
+			CASE 
+				WHEN ((divfs.num_of_bytes_written - tdivfs.num_of_bytes_written) < 0)  
+				THEN (9233372036854775807 + (divfs.num_of_bytes_written - tdivfs.num_of_bytes_written))
+				ELSE (divfs.num_of_bytes_written - tdivfs.num_of_bytes_written)
+			END  AS num_of_bytes_written,
+			CASE 
+				WHEN ((divfs.io_stall_write_ms - tdivfs.io_stall_write_ms) < 0)  
+				THEN (9233372036854775807 + (divfs.io_stall_write_ms - tdivfs.io_stall_write_ms))
+				ELSE (divfs.io_stall_write_ms - tdivfs.io_stall_write_ms)
+			END  AS io_stall_write_ms,
+			CASE 
+				WHEN ((divfs.io_stall - tdivfs.io_stall) < 0)  
+				THEN (9233372036854775807 + (divfs.io_stall - tdivfs.io_stall))
+				ELSE (divfs.io_stall - tdivfs.io_stall)
+			END  AS io_stall
+			FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS divfs
+			INNER JOIN #temp_dm_io_virtual_file_stats tdivfs on divfs.database_id=tdivfs.database_id AND divfs.FILE_ID=tdivfs.FILE_ID
+			JOIN sys.master_files AS mf ON mf.database_id = divfs.database_id
+			AND mf.FILE_ID = divfs.FILE_ID
+			ORDER BY num_of_Reads DESC
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+	ELSE IF @TYPEEXECUTION = 2 -- Type Execution 02 --  Execução da 1º chamada para coleta de dados correntes
+		BEGIN
+			DECLARE @COLLECT_FIRST_EXECUTION VARCHAR(MAX);
+			DECLARE @DROP_TB_OLD VARCHAR(MAX);
+
+			--------------------------------------- Dropando tabela temp caso exista ---------------------------------------
+			
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_FIRST_EXECUTION)
+				SELECT @DROP_TB_OLD='DROP TABLE tempdb..'+@TB_FIRST_EXECUTION+';'
+
+			EXEC (@DROP_TB_OLD)
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+			
+			SET @COLLECT_FIRST_EXECUTION='USE tempdb;SELECT 
+			mf.database_id as database_id,
+			DB_NAME(mf.database_id) AS databaseName,
+			mf.FILE_ID as FILE_ID, 
+			CASE
+			WHEN TYPE_desc = ''LOG'' THEN ''Log File''
+			WHEN TYPE_desc = ''ROWS'' THEN ''Data File''
+			ELSE TYPE_desc
+			END AS File_TYPE_desc
+			,mf.physical_name
+			,num_of_reads
+			,num_of_bytes_read
+			,io_stall_read_ms
+			,num_of_writes
+			,num_of_bytes_written
+			,io_stall_write_ms
+			,io_stall
+			into ' + @TB_FIRST_EXECUTION + 
+			' FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS divfs
+			JOIN sys.master_files AS mf ON mf.database_id = divfs.database_id
+			AND mf.FILE_ID = divfs.FILE_ID
+			ORDER BY num_of_Reads DESC'
+			
+			EXECUTE(@COLLECT_FIRST_EXECUTION)
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+	ELSE IF @TYPEEXECUTION = 3 -- Type Execution 03 -- Execução da 2º chamada para comparação com a 1º
+		BEGIN
+			DECLARE @REPORT_IO_DATABASE VARCHAR(MAX)
+			DECLARE @REPORT_IO_DEVICES VARCHAR(MAX)
+			DECLARE @DROP_TB_01 VARCHAR(MAX);
+
+			--------------------------------------- Relatório Activity - I/O DataBases ---------------------------------------
+
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'ACTIVITY - I/O DATABASES ' 
+			PRINT '=============================================================================='
+			PRINT ''
+
+			SET @REPORT_IO_DATABASE='USE tempdb;SELECT
+			CONVERT(char(30),DB_NAME(mf.database_id)) AS databaseName,
+			CASE
+				WHEN mf.TYPE_desc = ''LOG'' THEN CONVERT(char(10),''Log File'')
+				WHEN mf.TYPE_desc = ''ROWS'' THEN CONVERT(char(10),''Data File'')
+				ELSE CONVERT(char(10),mf.TYPE_desc)
+			END AS File_TYPE_desc,
+			CASE 
+				WHEN (sum(divfs.num_of_reads) - sum(tdivfs.num_of_reads) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.num_of_reads) - sum(tdivfs.num_of_reads)))
+				ELSE (sum(divfs.num_of_reads) - sum(tdivfs.num_of_reads))
+			END  AS num_of_reads,
+			CASE 
+				WHEN (sum(divfs.num_of_bytes_read) - sum(tdivfs.num_of_bytes_read) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.num_of_bytes_read) - sum(tdivfs.num_of_bytes_read)))
+				ELSE (sum(divfs.num_of_bytes_read) - sum(tdivfs.num_of_bytes_read))
+			END  AS num_of_bytes_read,
+			CASE 
+				WHEN (sum(divfs.io_stall_read_ms) - sum(tdivfs.io_stall_read_ms) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.io_stall_read_ms) - sum(tdivfs.io_stall_read_ms)))
+				ELSE (sum(divfs.io_stall_read_ms) - sum(tdivfs.io_stall_read_ms))
+			END  AS io_stall_read_ms,
+			CASE 
+				WHEN (sum(divfs.num_of_writes) - sum(tdivfs.num_of_writes) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.num_of_writes) - sum(tdivfs.num_of_writes)))
+				ELSE (sum(divfs.num_of_writes) - sum(tdivfs.num_of_writes))
+			END  AS num_of_writes,
+			CASE 
+				WHEN (sum(divfs.num_of_bytes_written) - sum(tdivfs.num_of_bytes_written) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.num_of_bytes_written) - sum(tdivfs.num_of_bytes_written)))
+				ELSE (sum(divfs.num_of_bytes_written) - sum(tdivfs.num_of_bytes_written))
+			END  AS num_of_bytes_written,
+			CASE 
+				WHEN (sum(divfs.io_stall_write_ms) - sum(tdivfs.io_stall_write_ms) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.io_stall_write_ms) - sum(tdivfs.io_stall_write_ms)))
+				ELSE (sum(divfs.io_stall_write_ms) - sum(tdivfs.io_stall_write_ms))
+			END  AS io_stall_write_ms,
+			CASE 
+				WHEN (sum(divfs.io_stall) - sum(tdivfs.io_stall) < 0)  
+				THEN (9233372036854775807 + (sum(divfs.io_stall) - sum(tdivfs.io_stall)))
+				ELSE (sum(divfs.io_stall) - sum(tdivfs.io_stall))
+			END  AS io_stall
+			FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS divfs
+			INNER JOIN ' + @TB_FIRST_EXECUTION + ' tdivfs on divfs.database_id=tdivfs.database_id AND divfs.FILE_ID=tdivfs.FILE_ID
+			JOIN sys.master_files AS mf ON mf.database_id = divfs.database_id
+			AND mf.FILE_ID = divfs.FILE_ID
+			GROUP BY mf.database_id, mf.TYPE_desc
+			ORDER BY num_of_reads DESC'
+		
+			EXEC (@REPORT_IO_DATABASE)
+			
+			--------------------------------------- Relatório Activity - I/O Devices ---------------------------------------
+
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '==============================================================================' 
+			PRINT 'ACTIVITY - I/O DEVICES ' 
+			PRINT '=============================================================================='
+			PRINT ''
+			
+			SET @REPORT_IO_DEVICES='USE tempdb;SELECT
+			CONVERT(char(30),DB_NAME(mf.database_id)) AS databaseName,
+			CASE
+				WHEN mf.TYPE_desc = ''LOG'' THEN CONVERT(char(10),''Log File'')
+				WHEN mf.TYPE_desc = ''ROWS'' THEN CONVERT(char(10),''Data File'')
+				ELSE CONVERT(char(10),mf.TYPE_desc)
+			END AS File_TYPE_desc,
+			CONVERT(char(128),mf.physical_name) as physical_name,
+			CASE 
+				WHEN ((divfs.num_of_reads - tdivfs.num_of_reads) < 0)  
+				THEN (9233372036854775807 + (divfs.num_of_reads - tdivfs.num_of_reads))
+				ELSE (divfs.num_of_reads - tdivfs.num_of_reads)
+			END  AS num_of_reads,
+			CASE 
+				WHEN ((divfs.num_of_bytes_read - tdivfs.num_of_bytes_read) < 0)  
+				THEN (9233372036854775807 + (divfs.num_of_bytes_read - tdivfs.num_of_bytes_read))
+				ELSE (divfs.num_of_bytes_read - tdivfs.num_of_bytes_read)
+			END  AS num_of_bytes_read,
+			CASE 
+				WHEN ((divfs.io_stall_read_ms - tdivfs.io_stall_read_ms) < 0)  
+				THEN (9233372036854775807 + (divfs.io_stall_read_ms - tdivfs.io_stall_read_ms))
+				ELSE (divfs.io_stall_read_ms - tdivfs.io_stall_read_ms)
+			END  AS io_stall_read_ms,
+			CASE 
+				WHEN ((divfs.num_of_writes - tdivfs.num_of_writes) < 0)  
+				THEN (9233372036854775807 + (divfs.num_of_writes - tdivfs.num_of_writes))
+				ELSE (divfs.num_of_writes - tdivfs.num_of_writes)
+			END  AS num_of_writes,
+			CASE 
+				WHEN ((divfs.num_of_bytes_written - tdivfs.num_of_bytes_written) < 0)  
+				THEN (9233372036854775807 + (divfs.num_of_bytes_written - tdivfs.num_of_bytes_written))
+				ELSE (divfs.num_of_bytes_written - tdivfs.num_of_bytes_written)
+			END  AS num_of_bytes_written,
+			CASE 
+				WHEN ((divfs.io_stall_write_ms - tdivfs.io_stall_write_ms) < 0)  
+				THEN (9233372036854775807 + (divfs.io_stall_write_ms - tdivfs.io_stall_write_ms))
+				ELSE (divfs.io_stall_write_ms - tdivfs.io_stall_write_ms)
+			END  AS io_stall_write_ms,
+			CASE 
+				WHEN ((divfs.io_stall - tdivfs.io_stall) < 0)  
+				THEN (9233372036854775807 + (divfs.io_stall - tdivfs.io_stall))
+				ELSE (divfs.io_stall - tdivfs.io_stall)
+			END  AS io_stall
+			FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS divfs
+			INNER JOIN ' + @TB_FIRST_EXECUTION + ' tdivfs on divfs.database_id=tdivfs.database_id AND divfs.FILE_ID=tdivfs.FILE_ID
+			JOIN sys.master_files AS mf ON mf.database_id = divfs.database_id
+			AND mf.FILE_ID = divfs.FILE_ID
+			ORDER BY num_of_Reads DESC'
+			
+			EXEC (@REPORT_IO_DEVICES)
+			
+			SET @DROP_TB_01='USE tempdb;DROP TABLE ' + @TB_FIRST_EXECUTION
+
+			--------------------------------------------- Executando relatórios ---------------------------------------------
+
+			EXEC (@DROP_TB_01)
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+END
