@@ -1,0 +1,468 @@
+IF EXISTS(SELECT 1 FROM sys.procedures WHERE TYPE = 'P' AND name = 'sp__waitsmon')
+BEGIN
+	DROP PROCEDURE sp__waitsmon
+END
+
+	
+USE [master]
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp__waitsmon] @DELAYMINUTES SMALLINT=1, @TYPEEXECUTION INT=1, @TB_FIRST_EXECUTION VARCHAR(MAX) = NULL, @TB_SECOND_EXECUTION VARCHAR(MAX) = NULL
+WITH ENCRYPTION AS
+BEGIN
+	---------------------------------------------- Setando parametros Default ----------------------------------------------
+	
+	SET NOCOUNT ON;
+	IF @DELAYMINUTES NOT BETWEEN 1 AND 60
+	SET @DELAYMINUTES = 1
+	DECLARE @DT_MONIT DATETIME
+	SET @DT_MONIT = GETDATE()
+	
+	IF @TYPEEXECUTION = 1
+		BEGIN
+			--------------------------------------- Dropando tabelas temp caso exista ---------------------------------------
+			
+			IF OBJECT_ID('tempdb..#sqlmon_waits_before') IS NOT NULL
+				DROP TABLE #sqlmon_waits_before
+
+			IF OBJECT_ID('tempdb..#sqlmon_waits_after') IS NOT NULL
+				DROP TABLE #sqlmon_waits_after
+
+			IF OBJECT_ID('tempdb..#sqlmon_waits_delta') IS NOT NULL
+				DROP TABLE #sqlmon_waits_delta
+
+			IF OBJECT_ID('tempdb..#sqlmon_waits_filtered') IS NOT NULL
+				DROP TABLE #sqlmon_waits_filtered
+				
+			IF OBJECT_ID('tempdb..#sqlmon_waits_all') IS NOT NULL
+				DROP TABLE #sqlmon_waits_all
+				
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+
+			SELECT [wait_TYPE], [waiting_tASks_count], [wait_time_ms], [max_wait_time_ms], [signal_wait_time_ms]
+			INTO #sqlmon_waits_before
+			FROM sys.dm_os_wait_stats
+
+			---------------------------------------- Tempo de espera entre execuções ----------------------------------------
+			
+			DECLARE @WAIT VARCHAR(100)
+			SELECT @WAIT='WAITFOR delay ''00:'+right('0'+CONVERT(VARCHAR(2),@DELAYMINUTES),2)+':00'''
+			EXEC (@WAIT)
+
+			----------------------------------------- Coletando Waits da 2º chamada -----------------------------------------
+			
+			SELECT [wait_TYPE], [waiting_tASks_count], [wait_time_ms], [max_wait_time_ms], [signal_wait_time_ms]
+			INTO #sqlmon_waits_after
+			FROM sys.dm_os_wait_stats;
+
+			-------------------------------------------- Inicio de calculo Delta --------------------------------------------
+
+			SELECT * INTO #sqlmon_waits_delta FROM (SELECT -- Waits que não estão na primeira captura
+					[wa].[wait_TYPE],
+					[wa].[wait_time_ms],
+					[wa].[signal_wait_time_ms],
+					[wa].[waiting_tASks_count]
+				FROM [#sqlmon_waits_after] AS [wa]
+				LEFT OUTER JOIN [#sqlmon_waits_before] AS [wb]
+					ON [wa].[wait_TYPE] = [wb].[wait_TYPE]
+				WHERE [wb].[wait_TYPE] IS NULL
+				AND [wa].[wait_time_ms] > 0
+			UNION SELECT [wa].[wait_TYPE], -- Delta dos waits que estão em ambas capturas
+					CASE WHEN (([wa].[wait_time_ms] - [wb].[wait_time_ms]) <0) 
+						THEN (9223372036854775807 + ([wa].[wait_time_ms] - [wb].[wait_time_ms]))
+						ELSE [wa].[wait_time_ms] - [wb].[wait_time_ms]
+					END AS [wait_time_ms],
+					
+					CASE WHEN (([wa].[signal_wait_time_ms] - [wb].[signal_wait_time_ms]) < 0)
+						THEN (9223372036854775807 + ([wa].[signal_wait_time_ms] - [wb].[signal_wait_time_ms]))
+						ELSE [wa].[signal_wait_time_ms] - [wb].[signal_wait_time_ms]
+					END AS [signal_wait_time_ms],
+					
+					CASE WHEN (([wa].[waiting_tASks_count] - [wb].[waiting_tASks_count]) < 0)
+						THEN (9223372036854775807 + ([wa].[waiting_tASks_count] - [wb].[waiting_tASks_count]))
+						ELSE [wa].[waiting_tASks_count] - [wb].[waiting_tASks_count]
+					END  AS [waiting_tASks_count]
+			FROM [#sqlmon_waits_after] AS [wa]
+			LEFT OUTER JOIN [#sqlmon_waits_before] AS [wb]
+				ON [wa].[wait_TYPE] = [wb].[wait_TYPE]
+			WHERE [wb].[wait_TYPE] IS NOT NULL
+			AND [wa].[waiting_tASks_count] - [wb].[waiting_tASks_count] > 0
+			AND [wa].[wait_time_ms] - [wb].[wait_time_ms] > 0) AS Delta
+			
+			----------------------------- Filtrando principais Waits ordenados por wait_time (S) -----------------------------
+
+			SELECT * INTO #sqlmon_waits_filtered
+			FROM  (SELECT [wait_TYPE], [wait_time_ms] / 1000.0 AS [Wait_time_S],
+					--([wait_time_ms] - [signal_wait_time_ms]) / 1000.0 AS [Resource_time_S],
+					--[signal_wait_time_ms] / 1000.0 AS [Signal_S],
+					[waiting_tASks_count] AS [Wait_Count],
+					100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER() AS [Percentage],
+					ROW_NUMBER() OVER(ORDER BY [wait_time_ms] DESC) AS [RowNum]
+				FROM [#sqlmon_waits_delta]
+				WHERE [wait_TYPE] NOT IN (
+					N'BROKER_EVENTHANDLER',                 N'BROKER_RECEIVE_WAITFOR',
+					N'BROKER_TASK_STOP',                    N'BROKER_TO_FLUSH',
+					N'BROKER_TRANSMITTER',                  N'CHECKPOINT_QUEUE',
+					N'CHKPT',                               N'CLR_AUTO_EVENT',
+					N'CLR_MANUAL_EVENT',                    N'CLR_SEMAPHORE',
+					N'DBMIRROR_DBM_EVENT',                  N'DBMIRROR_EVENTS_QUEUE',
+					N'DBMIRROR_WORKER_QUEUE',               N'DBMIRRORING_CMD',
+			 
+					N'DIRTY_PAGE_POLL',                     N'DISPATCHER_QUEUE_SEMAPHORE',
+					N'EXECSYNC',                            N'FSAGENT',
+					N'FT_IFTS_SCHEDULER_IDLE_WAIT',     	N'FT_IFTSHC_MUTEX', 
+					N'HADR_CLUSAPI_CALL',                   N'HADR_FILESTREAM_IOMGR_IOCOMPLETION',
+					N'HADR_LOGCAPTURE_WAIT',                N'HADR_NOTIFICATION_DEQUEUE',
+					N'HADR_TIMER_TASK',                     N'HADR_WORK_QUEUE',
+			 
+					N'KSOURCE_WAKEUP',                      N'LAZYWRITER_SLEEP',
+					N'LOGMGR_QUEUE',                        N'MEMORY_ALLOCATION_EXT',
+					N'ONDEMAND_TASK_QUEUE',                 N'PREEMPTIVE_XE_GETTARGETSTATE',
+					N'PWAIT_ALL_COMPONENTS_INITIALIZED',    N'PWAIT_DIRECTLOGCONSUMER_GETNEXT',
+					N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',    N'QDS_ASYNC_QUEUE',
+					N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
+					N'QDS_SHUTDOWN_QUEUE', N'REDO_THREAD_PENDING_WORK',
+					N'REQUEST_FOR_DEADLOCK_SEARCH',     N'RESOURCE_QUEUE',
+					N'SERVER_IDLE_CHECK',                   N'SLEEP_BPOOL_FLUSH',
+					N'SLEEP_DBSTARTUP',                     N'SLEEP_DCOMSTARTUP',
+					N'SLEEP_MASTERDBREADY',                 N'SLEEP_MASTERMDREADY',
+					N'SLEEP_MASTERUPGRADED',                N'SLEEP_MSDBSTARTUP',
+					N'SLEEP_SYSTEMTASK',                    N'SLEEP_TASK',
+					N'SLEEP_tempdbSTARTUP',                 N'SNI_HTTP_ACCEPT',
+					N'SP_SERVER_DIAGNOSTICS_SLEEP',     N'SQLTRACE_BUFFER_FLUSH',
+					N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP',
+					N'SQLTRACE_WAIT_ENTRIES',               N'WAIT_FOR_RESULTS',
+					N'WAITFOR',                             N'WAITFOR_TASKSHUTDOWN',
+					N'WAIT_XTP_RECOVERY',
+					N'WAIT_XTP_HOST_WAIT',                  N'WAIT_XTP_OFFLINE_CKPT_NEW_LOG',
+					N'WAIT_XTP_CKPT_CLOSE',                 N'XE_DISPATCHER_JOIN',                               
+					N'XE_DISPATCHER_WAIT',                  N'XE_TIMER_EVENT')
+				) AS WF
+
+			------------------------------------------- Capturando todos os Waits -------------------------------------------
+
+			SELECT * INTO #sqlmon_waits_all
+			FROM  (SELECT [wait_TYPE], [wait_time_ms] / 1000.0 AS [Wait_time_S],
+					--([wait_time_ms] - [signal_wait_time_ms]) / 1000.0 AS [Resource_time_S],
+					--[signal_wait_time_ms] / 1000.0 AS [Signal_S],
+					[waiting_tASks_count] AS [Wait_Count],
+					100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER() AS [Percentage],
+					ROW_NUMBER() OVER(ORDER BY [wait_time_ms] DESC) AS [RowNum]
+				FROM [#sqlmon_waits_delta]) AS WA
+				
+				
+			----------------------------------------- Relatório de principais Waits -----------------------------------------
+
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '========================================================='
+			PRINT 'Most Significant Wait Types ' + CAST(@DELAYMINUTES AS varchar(3))  + ' minute(s)'
+			PRINT '========================================================='
+			PRINT ''
+
+			SELECT [W_F].[wait_TYPE] AS [WaitType],
+				CAST ([W_F].[Wait_time_S] AS DECIMAL (16, 2)) AS [Wait_time_S],
+				--CAST ([W_F].[Resource_time_S] AS DECIMAL (16, 2)) AS [Resource_S],
+				--CAST ([W_F].[Signal_S] AS DECIMAL (16, 2)) AS [Signal_S],
+				[W_F].[Wait_Count] AS [WaitCount],
+				CAST ([W_F].[Percentage] AS DECIMAL (5, 2)) AS [Percent (%)],
+				CAST (([W_F].[Wait_time_S] / [W_F].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgWait_S]
+				--CAST (([W_F].[Resource_time_S] / [W_F].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgRes_S],
+				--CAST (([W_F].[Signal_S] / [W_F].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgSig_S]
+			FROM [#sqlmon_waits_filtered] AS [W_F]
+			INNER JOIN [#sqlmon_waits_filtered] AS [W_F2]
+				ON [W_F2].[RowNum] <= [W_F].[RowNum]
+			GROUP BY [W_F].[RowNum], [W_F].[wait_TYPE], [W_F].[Wait_time_S], [W_F].[Wait_Count], [W_F].[Percentage]
+
+			------------------------------------------ Relatório de todos os Waits ------------------------------------------
+			
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '========================================================='
+			PRINT ' All Wait Types ' + CAST(@DELAYMINUTES AS varchar(3)) + ' minute(s)'
+			PRINT '========================================================='
+			PRINT ''
+
+			SELECT [W_A].[wait_TYPE] AS [WaitType],
+				CAST ([W_A].[Wait_time_S] AS DECIMAL (16, 2)) AS [Wait_time_S],
+				--CAST ([W_A].[Resource_time_S] AS DECIMAL (16, 2)) AS [Resource_S],
+				--CAST ([W_A].[Signal_S] AS DECIMAL (16, 2)) AS [Signal_S],
+				[W_A].[Wait_Count] AS [WaitCount],
+				CAST ([W_A].[Percentage] AS DECIMAL (5, 2)) AS [Percent (%)],
+				CAST (([W_A].[Wait_time_S] / [W_A].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgWait_S]
+				--CAST (([W_A].[Resource_time_S] / [W_A].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgRes_S],
+				--CAST (([W_A].[Signal_S] / [W_A].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgSig_S]
+			FROM [#sqlmon_waits_all] AS [W_A]
+			INNER JOIN [#sqlmon_waits_all] AS [W_A2]
+				ON [W_A2].[RowNum] <= [W_A].[RowNum]
+			GROUP BY [W_A].[RowNum], [W_A].[wait_TYPE], [W_A].[Wait_time_S], [W_A].[Wait_Count], [W_A].[Percentage]
+
+			--------------------------------------- Dropando tabelas temp caso exista ---------------------------------------
+
+			IF EXISTS (SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = N'#sqlmon_waits_before')
+				DROP TABLE [#sqlmon_waits_before];
+			 
+			IF EXISTS (SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = N'#sqlmon_waits_after')
+				DROP TABLE [#sqlmon_waits_after];
+
+			IF EXISTS (SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = N'#sqlmon_waits_delta')
+				DROP TABLE [#sqlmon_waits_delta];
+
+			IF EXISTS (SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = N'#sqlmon_waits_filtered')
+				DROP TABLE [#sqlmon_waits_filtered];
+				
+			IF EXISTS (SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = N'#sqlmon_waits_all')
+				DROP TABLE [#sqlmon_waits_all];
+				
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+	ELSE IF @TYPEEXECUTION = 2 -- Type Execution 02 --  Execução da 1º chamada para coleta de dados correntes
+		BEGIN
+			DECLARE @COLLECT_FIRST_EXECUTION VARCHAR(MAX)
+			DECLARE @DROP_TB_OLD VARCHAR(MAX);
+
+			--------------------------------------- Dropando tabela temp caso exista ---------------------------------------
+			
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_FIRST_EXECUTION)
+				SELECT @DROP_TB_OLD='DROP TABLE tempdb..'+@TB_FIRST_EXECUTION+';'
+
+			EXEC (@DROP_TB_OLD)
+			
+			----------------------------------------- Coletando Waits da 1º chamada -----------------------------------------
+			
+			SET @COLLECT_FIRST_EXECUTION='USE tempdb;SELECT [wait_TYPE], [waiting_tASks_count], [wait_time_ms],
+			[max_wait_time_ms], [signal_wait_time_ms]
+			INTO ' + @TB_FIRST_EXECUTION + ' FROM sys.dm_os_wait_stats'
+			
+			EXEC(@COLLECT_FIRST_EXECUTION )
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+	ELSE IF @TYPEEXECUTION = 3 -- Type Execution 03 -- Execução da 2º chamada para comparação com a 1º
+		BEGIN
+			DECLARE @COLLECT_SECOND_EXECUTION VARCHAR(MAX)
+			DECLARE @REPORT_ALL_WAIT VARCHAR(MAX)
+			DECLARE @FILTER_MAIN_WAIT VARCHAR(MAX)
+			DECLARE @COLLECT_ALL_WAIT VARCHAR(MAX)
+			DECLARE @REPORT_MAIN_WAIT VARCHAR(MAX)
+			DECLARE @REPORT_FULL_WAIT VARCHAR(MAX)
+			DECLARE @DROP_TB_01 VARCHAR(MAX)
+			DECLARE @DROP_TB_02 VARCHAR(MAX)
+
+			--------------------------------------- Dropando tabela temp caso exista ---------------------------------------
+			
+			IF EXISTS(SELECT * FROM [tempdb].[sys].[objects]
+				WHERE [name] = @TB_SECOND_EXECUTION)
+				SELECT @DROP_TB_OLD='DROP TABLE tempdb..'+@TB_SECOND_EXECUTION+';'
+
+			EXEC (@DROP_TB_OLD)
+			
+			----------------------------------------- Coletando Waits da 2º chamada -----------------------------------------
+			
+			SET @COLLECT_SECOND_EXECUTION='USE tempdb;SELECT [wait_TYPE], [waiting_tASks_count], [wait_time_ms],
+			[max_wait_time_ms], [signal_wait_time_ms]
+			INTO ' + @TB_SECOND_EXECUTION + ' FROM sys.dm_os_wait_stats'
+			
+			EXEC (@COLLECT_SECOND_EXECUTION)
+			
+			--------------------------------------- Dropando tabelas temp caso exista ---------------------------------------
+			
+			IF OBJECT_ID('tempdb..sqlmon_waits_delta') IS NOT NULL
+				DROP TABLE tempdb..sqlmon_waits_delta
+
+			IF OBJECT_ID('tempdb..sqlmon_waits_filtered') IS NOT NULL
+				DROP TABLE tempdb..sqlmon_waits_filtered
+				
+			IF OBJECT_ID('tempdb..sqlmon_waits_all') IS NOT NULL
+				DROP TABLE tempdb..sqlmon_waits_all
+			
+			------------------------------------------ Relatório de todos os Waits ------------------------------------------
+			
+			SET @REPORT_ALL_WAIT='USE tempdb;SELECT * INTO sqlmon_waits_delta FROM (SELECT -- Waits que não estão na primeira captura
+					[wa].[wait_TYPE],
+					[wa].[wait_time_ms],
+					[wa].[signal_wait_time_ms],
+					[wa].[waiting_tASks_count]
+				FROM ' + @TB_SECOND_EXECUTION + ' AS [wa]
+				LEFT OUTER JOIN ' + @TB_FIRST_EXECUTION + ' AS [wb]
+					ON [wa].[wait_TYPE] = [wb].[wait_TYPE]
+				WHERE [wb].[wait_TYPE] IS NULL
+				AND [wa].[wait_time_ms] > 0
+			UNION SELECT [wa].[wait_TYPE], -- Delta dos waits que estão em ambas capturas
+					CASE WHEN (([wa].[wait_time_ms] - [wb].[wait_time_ms]) <0) 
+						THEN (9223372036854775807 + ([wa].[wait_time_ms] - [wb].[wait_time_ms]))
+						ELSE [wa].[wait_time_ms] - [wb].[wait_time_ms]
+					END AS [wait_time_ms],
+					
+					CASE WHEN (([wa].[signal_wait_time_ms] - [wb].[signal_wait_time_ms]) < 0)
+						THEN (9223372036854775807 + ([wa].[signal_wait_time_ms] - [wb].[signal_wait_time_ms]))
+						ELSE [wa].[signal_wait_time_ms] - [wb].[signal_wait_time_ms]
+					END AS [signal_wait_time_ms],
+					
+					CASE WHEN (([wa].[waiting_tASks_count] - [wb].[waiting_tASks_count]) < 0)
+						THEN (9223372036854775807 + ([wa].[waiting_tASks_count] - [wb].[waiting_tASks_count]))
+						ELSE [wa].[waiting_tASks_count] - [wb].[waiting_tASks_count]
+					END  AS [waiting_tASks_count]
+			FROM ' + @TB_SECOND_EXECUTION + ' AS [wa]
+			LEFT OUTER JOIN ' + @TB_FIRST_EXECUTION + ' AS [wb]
+				ON [wa].[wait_TYPE] = [wb].[wait_TYPE]
+			WHERE [wb].[wait_TYPE] IS NOT NULL
+			AND [wa].[waiting_tASks_count] - [wb].[waiting_tASks_count] > 0
+			AND [wa].[wait_time_ms] - [wb].[wait_time_ms] > 0) AS Delta'
+			
+			EXEC (@REPORT_ALL_WAIT)
+
+			---------------------------- Filtrando principais Waits ordenados por wait_time (S) ----------------------------
+			
+			SET @FILTER_MAIN_WAIT='USE tempdb;SELECT * INTO sqlmon_waits_filtered FROM  (SELECT
+					[wait_TYPE],
+					[wait_time_ms] / 1000.0 AS [Wait_time_S],
+					--([wait_time_ms] - [signal_wait_time_ms]) / 1000.0 AS [Resource_time_S],
+					--[signal_wait_time_ms] / 1000.0 AS [Signal_S],
+					[waiting_tASks_count] AS [Wait_Count],
+					100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER() AS [Percentage],
+					ROW_NUMBER() OVER(ORDER BY [wait_time_ms] DESC) AS [RowNum]
+				FROM [sqlmon_waits_delta]
+				WHERE [wait_TYPE] NOT IN (
+					N''BROKER_EVENTHANDLER'',                 N''BROKER_RECEIVE_WAITFOR'',
+					N''BROKER_TASK_STOP'',                    N''BROKER_TO_FLUSH'',
+					N''BROKER_TRANSMITTER'',                  N''CHECKPOINT_QUEUE'',
+					N''CHKPT'',                               N''CLR_AUTO_EVENT'',
+					N''CLR_MANUAL_EVENT'',                    N''CLR_SEMAPHORE'',
+					N''DBMIRROR_DBM_EVENT'',                  N''DBMIRROR_EVENTS_QUEUE'',
+					N''DBMIRROR_WORKER_QUEUE'',               N''DBMIRRORING_CMD'',
+			 
+					N''DIRTY_PAGE_POLL'',                     N''DISPATCHER_QUEUE_SEMAPHORE'',
+					N''EXECSYNC'',                            N''FSAGENT'',
+					N''FT_IFTS_SCHEDULER_IDLE_WAIT'',     	N''FT_IFTSHC_MUTEX'', 
+					N''HADR_CLUSAPI_CALL'',                   N''HADR_FILESTREAM_IOMGR_IOCOMPLETION'',
+					N''HADR_LOGCAPTURE_WAIT'',                N''HADR_NOTIFICATION_DEQUEUE'',
+					N''HADR_TIMER_TASK'',                     N''HADR_WORK_QUEUE'',
+			 
+					N''KSOURCE_WAKEUP'',                      N''LAZYWRITER_SLEEP'',
+					N''LOGMGR_QUEUE'',                        N''MEMORY_ALLOCATION_EXT'',
+					N''ONDEMAND_TASK_QUEUE'',                 N''PREEMPTIVE_XE_GETTARGETSTATE'',
+					N''PWAIT_ALL_COMPONENTS_INITIALIZED'',    N''PWAIT_DIRECTLOGCONSUMER_GETNEXT'',
+					N''QDS_PERSIST_TASK_MAIN_LOOP_SLEEP'',    N''QDS_ASYNC_QUEUE'',
+					N''QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP'',
+					N''QDS_SHUTDOWN_QUEUE'', N''REDO_THREAD_PENDING_WORK'',
+					N''REQUEST_FOR_DEADLOCK_SEARCH'',     N''RESOURCE_QUEUE'',
+					N''SERVER_IDLE_CHECK'',                   N''SLEEP_BPOOL_FLUSH'',
+					N''SLEEP_DBSTARTUP'',                     N''SLEEP_DCOMSTARTUP'',
+					N''SLEEP_MASTERDBREADY'',                 N''SLEEP_MASTERMDREADY'',
+					N''SLEEP_MASTERUPGRADED'',                N''SLEEP_MSDBSTARTUP'',
+					N''SLEEP_SYSTEMTASK'',                    N''SLEEP_TASK'',
+					N''SLEEP_tempdbSTARTUP'',                 N''SNI_HTTP_ACCEPT'',
+					N''SP_SERVER_DIAGNOSTICS_SLEEP'',     N''SQLTRACE_BUFFER_FLUSH'',
+					N''SQLTRACE_INCREMENTAL_FLUSH_SLEEP'',
+					N''SQLTRACE_WAIT_ENTRIES'',               N''WAIT_FOR_RESULTS'',
+					N''WAITFOR'',                             N''WAITFOR_TASKSHUTDOWN'',
+					N''WAIT_XTP_RECOVERY'',
+					N''WAIT_XTP_HOST_WAIT'',                  N''WAIT_XTP_OFFLINE_CKPT_NEW_LOG'',
+					N''WAIT_XTP_CKPT_CLOSE'',                 N''XE_DISPATCHER_JOIN'',                               
+					N''XE_DISPATCHER_WAIT'',                  N''XE_TIMER_EVENT'')
+				) AS WF'
+				
+			EXEC (@FILTER_MAIN_WAIT)
+				
+			------------------------------------------ Capturando todos os Waits ------------------------------------------
+
+			SET @COLLECT_ALL_WAIT='USE tempdb;SELECT * INTO sqlmon_waits_all FROM (SELECT
+					[wait_TYPE], [wait_time_ms] / 1000.0 AS [Wait_time_S],
+					--([wait_time_ms] - [signal_wait_time_ms]) / 1000.0 AS [Resource_time_S],
+					--[signal_wait_time_ms] / 1000.0 AS [Signal_S],
+					[waiting_tASks_count] AS [Wait_Count],
+					100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER() AS [Percentage],
+					ROW_NUMBER() OVER(ORDER BY [wait_time_ms] DESC) AS [RowNum]
+				FROM [sqlmon_waits_delta]) AS WA'
+				
+			EXEC (@COLLECT_ALL_WAIT)				
+				
+			--------------------------------------- Relatório das principais Waits ---------------------------------------
+			
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '========================================================='
+			PRINT 'Most Significant Wait Types ' 
+			PRINT '========================================================='
+			PRINT ''
+
+			SET @REPORT_MAIN_WAIT='USE tempdb;SELECT
+				[W_F].[wait_TYPE] AS [WaitType],
+				CAST ([W_F].[Wait_time_S] AS DECIMAL (16, 2)) AS [Wait_time_S],
+				--CAST ([W_F].[Resource_time_S] AS DECIMAL (16, 2)) AS [Resource_S],
+				--CAST ([W_F].[Signal_S] AS DECIMAL (16, 2)) AS [Signal_S],
+				[W_F].[Wait_Count] AS [WaitCount],
+				CAST ([W_F].[Percentage] AS DECIMAL (5, 2)) AS [Percent (%)],
+				CAST (([W_F].[Wait_time_S] / [W_F].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgWait_S]
+				--CAST (([W_F].[Resource_time_S] / [W_F].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgRes_S],
+				--CAST (([W_F].[Signal_S] / [W_F].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgSig_S]
+			FROM [sqlmon_waits_filtered] AS [W_F]
+			INNER JOIN [sqlmon_waits_filtered] AS [W_F2]
+				ON [W_F2].[RowNum] <= [W_F].[RowNum]
+			GROUP BY [W_F].[RowNum], [W_F].[wait_TYPE], [W_F].[Wait_time_S], [W_F].[Wait_Count], [W_F].[Percentage]'
+
+			EXEC (@REPORT_MAIN_WAIT)
+
+			---------------------------------------- Relatório de todos os Waits ----------------------------------------
+
+			PRINT ''
+			PRINT '========================================================='
+			PRINT @DT_MONIT
+			PRINT '========================================================='
+			PRINT ''
+			PRINT ''
+			PRINT '========================================================='
+			PRINT ' All Wait Types ' 
+			PRINT '========================================================='
+			PRINT ''
+
+			SET @REPORT_FULL_WAIT='USE tempdb;SELECT
+				[W_A].[wait_TYPE] AS [WaitType],
+				CAST ([W_A].[Wait_time_S] AS DECIMAL (16, 2)) AS [Wait_time_S],
+				--CAST ([W_A].[Resource_time_S] AS DECIMAL (16, 2)) AS [Resource_S],
+				--CAST ([W_A].[Signal_S] AS DECIMAL (16, 2)) AS [Signal_S],
+				[W_A].[Wait_Count] AS [WaitCount],
+				CAST ([W_A].[Percentage] AS DECIMAL (5, 2)) AS [Percent (%)],
+				CAST (([W_A].[Wait_time_S] / [W_A].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgWait_S]
+				--CAST (([W_A].[Resource_time_S] / [W_A].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgRes_S],
+				--CAST (([W_A].[Signal_S] / [W_A].[Wait_Count]) AS DECIMAL (16, 4)) AS [AvgSig_S]
+			FROM [sqlmon_waits_all] AS [W_A]
+			INNER JOIN [sqlmon_waits_all] AS [W_A2]
+				ON [W_A2].[RowNum] <= [W_A].[RowNum]
+			GROUP BY [W_A].[RowNum], [W_A].[wait_TYPE], [W_A].[Wait_time_S], [W_A].[Wait_Count], [W_A].[Percentage]'
+
+			EXEC (@REPORT_FULL_WAIT)
+
+			SET @DROP_TB_01='USE tempdb;DROP TABLE ' + @TB_FIRST_EXECUTION
+			SET @DROP_TB_02='USE tempdb;DROP TABLE ' + @TB_SECOND_EXECUTION 
+			
+			--------------------------------------------- Executando relatórios ---------------------------------------------
+	
+			EXEC (@DROP_TB_01)
+			EXEC (@DROP_TB_02)
+			
+			------------------------------------------------ Fim da Execução ------------------------------------------------
+		END
+END
