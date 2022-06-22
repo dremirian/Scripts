@@ -1,0 +1,29 @@
+declare @usu varchar(255);
+declare @t1 table(UserName varchar(255),UserSID varbinary(85));
+insert @t1
+EXEC sp_change_users_login'report'
+ 
+ 
+ 
+if exists(select * from @t1)
+begin
+DECLARE @return_status int;
+declare crs_user cursor dynamic for
+select UserName from @t1
+open crs_user
+fetch first from crs_user into @usu
+while @@fetch_status=0
+begin
+EXEC sp_change_users_login'Update_One',@usu,@usu;
+IF (@@ERROR >=0)
+fetch next from crs_user into @usu
+end
+ 
+ 
+ 
+close crs_user
+deallocate crs_user
+ 
+ 
+ 
+end
